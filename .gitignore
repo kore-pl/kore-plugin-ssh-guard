@@ -1,0 +1,7 @@
+# 本地联调用的 workspace 文件：跨仓 replace 只允许放这里，禁止提交（G-17）。
+go.work
+go.work.sum
+
+# 构建与打包产物。
+bin/
+dist/
