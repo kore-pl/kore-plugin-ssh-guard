@@ -1,8 +1,11 @@
-// Package main 是 kore 的 ssh-guard 插件：SSH 加固（失败封禁 + 配置审计）骨架。
+// Package main 是 kore 的 ssh-guard 插件：SSH 加固（配置审计 + 攻击统计 + 封禁视图）。
 //
-// 当前基础级（0.1.0）只做只读配置审计与结构化返回：审计输入来自宿主预注入的
-// sshd 配置文本，绝不打开或改写真实 /etc/ssh/sshd_config；不内置任何封禁执行器、
-// 不捆绑 fail2ban/iptables/nftables 二进制。真实封禁与配置落盘留待 v1.1。
+// 0.2.0（L1.5）：在只读配置审计之上新增真实日志统计与防护源检测——
+//   - 日志只读：解析 auth.log / journalctl 的 sshd 记录（尾部限读 1 MiB），
+//     聚合攻击尝试、可疑 IP 与时间线；用户名不进聚合视图（敏感值白名单：IP）。
+//   - 防护源：探测 fail2ban（未装/不可用时以 sshd 日志统计降级，不报错）。
+//   - 封禁/解封等写操作需要宿主 root：按 ADR-0018 声明 root_actions 交内核代理，
+//     插件进程自身永不提权，非 root 时返回 E_NEED_ROOT + 可操作提示。
 //
 // 协议面（kore.plugin.v1）：连接内核注入的 UDS → kore.hello 握手 → 会话循环
 // 读 request、按 method 分发并回 response；stdout 留给协议，日志一律写 stderr。
@@ -39,5 +42,5 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	logger.Info("hello 完成", "plugin_id", cfg.id, "version", cfg.version)
-	return serve(conn, cfg, logger)
+	return serve(conn, &cfg, logger)
 }

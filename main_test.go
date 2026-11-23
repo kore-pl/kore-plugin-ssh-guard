@@ -13,6 +13,7 @@ import (
 )
 
 // testConfig 构造握手与会话循环共用的一致配置（不依赖环境变量）。
+// guard 与真实 loadConfig 一致：从缺省值起底（不读环境，保证测试确定性）。
 func testConfig() config {
 	return config{
 		id:           "ssh-guard",
@@ -20,6 +21,7 @@ func testConfig() config {
 		requiresKore: ">=0.1.0 <0.2.0",
 		capabilities: []string{"system:admin"},
 		startedAt:    time.Now(),
+		guard:        defaultGuardConfig(),
 	}
 }
 
@@ -29,8 +31,9 @@ func testLogger() *slog.Logger {
 
 func startServe(conn net.Conn) <-chan error {
 	done := make(chan error, 1)
+	cfg := testConfig()
 	go func() {
-		err := serve(conn, testConfig(), testLogger())
+		err := serve(conn, &cfg, testLogger())
 		_ = conn.Close()
 		done <- err
 	}()

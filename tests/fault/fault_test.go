@@ -198,3 +198,53 @@ func TestTimeoutFault(t *testing.T) {
 	}
 	t.Logf("timeout fault: 进程已退出 err=%v", err)
 }
+
+// writeRawFrame 向插件侧连接写一个原始帧（4 字节长度前缀 + 载荷），用于注入非法帧。
+func writeRawFrame(t *testing.T, conn net.Conn, payload []byte) {
+	t.Helper()
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(payload)))
+	if _, err := conn.Write(hdr[:]); err != nil {
+		t.Fatalf("写帧头失败: %v", err)
+	}
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("写帧体失败: %v", err)
+	}
+}
+
+// TestGarbageFrameFault 握手后注入无法解码的垃圾帧，验证插件立即退出（≤2s），
+// 不进入"忽略坏帧继续跑"的降级——协议层要求解码失败即断开（§9）。
+func TestGarbageFrameFault(t *testing.T) {
+	h := startPlugin(t)
+	h.replyHello(t)
+	writeRawFrame(t, h.conn, []byte("garbage-not-a-frame"))
+	exited, err := waitExit(h.cmd, 2*time.Second)
+	if !exited {
+		t.Fatal("垃圾帧后插件未能在 2s 内退出（应解码失败即断开）")
+	}
+	if err == nil || !isExitError(err) {
+		t.Fatalf("垃圾帧应以非 0 码退出，实际 err=%v", err)
+	}
+	t.Logf("garbage frame fault: 进程已退出 err=%v", err)
+}
+
+// TestOversizedFrameFault 握手后注入超过 MaxFrameSize 的长度前缀（不发送载荷），
+// 验证插件在读取前即拒绝并退出（≤2s），不分配 8 MiB+ 的缓冲。
+func TestOversizedFrameFault(t *testing.T) {
+	h := startPlugin(t)
+	h.replyHello(t)
+	oversized := pluginapi.MaxFrameSize + 1
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(oversized))
+	if _, err := h.conn.Write(hdr[:]); err != nil {
+		t.Fatalf("写超帧前缀失败: %v", err)
+	}
+	exited, err := waitExit(h.cmd, 2*time.Second)
+	if !exited {
+		t.Fatalf("超帧前缀后插件未能在 2s 内退出（长度=%d > MaxFrameSize=%d）", oversized, pluginapi.MaxFrameSize)
+	}
+	if err == nil || !isExitError(err) {
+		t.Fatalf("超帧应以非 0 码退出，实际 err=%v", err)
+	}
+	t.Logf("oversized frame fault: 进程已退出 err=%v", err)
+}
