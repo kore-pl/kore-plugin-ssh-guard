@@ -1,82 +1,83 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"errors"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// cmdRunner 抽象外部命令执行，便于单测注入假 runner（不真跑 fail2ban）。
-type cmdRunner interface {
-	LookPath(name string) (string, error)
-	Run(args ...string) (stdout string, err error)
-}
+// fail2banClientPath 是 fail2ban-client 的**唯一路径口径**：代码与 info.json 的
+// root_actions[].argv[0] 逐字一致（TestFail2banPathsMatchInfoJSON 锁定）。
+//
+// 为什么是绝对路径而不是命令名：pluginapi.RootCommandAllowlist 不含 fail2ban-client
+// （协议常量在内核仓，本仓不改），argv[0] 只能写规范化绝对路径。因此本插件：
+//   - 进程内**不执行** fail2ban-client（只读探测一律经声明的 root action 由内核代理执行）；
+//   - 只用 exec.LookPath(fail2banClientPath) 判断「声明路径是否存在且可执行」，不向 PATH
+//     回退查找别处的同名二进制——避免「进程内探测成功、提权动作却因路径不同失败」的分裂。
+const fail2banClientPath = "/usr/bin/fail2ban-client"
 
-// execRunner 是默认实现：每次调用限时（G-19：请求级 context，defer cancel）。
-type execRunner struct {
-	timeout time.Duration
-}
+// root action id 常量：与 info.json 的 root_actions 一一对应，并在代码里被真实引用
+// （status/bans 探测 → fail2ban-status；ban.add/ban.remove → banip/unbanip），
+// 不再出现「声明了能力但代码零引用」（0.2.0 复核发现的 P1 债）。
+const (
+	rootActionFail2banStatus  = "fail2ban-status"
+	rootActionFail2banBanIP   = "fail2ban-banip"
+	rootActionFail2banUnbanIP = "fail2ban-unbanip"
+)
 
-// Run 执行外部命令并返回 stdout；超时或失败返回 error（stderr 拼进错误便于诊断）。
-func (r execRunner) Run(args ...string) (string, error) {
-	if len(args) == 0 {
-		return "", errors.New("空命令")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return stdout.String(), errors.New(err.Error() + ": " + msg)
-		}
-		return stdout.String(), err
-	}
-	return stdout.String(), nil
-}
+// lookPath 抽象可执行文件探测（只查文件，不执行命令）；单测可注入。
+var lookPath = exec.LookPath
 
-// LookPath 在 PATH 中查找命令。
-func (r execRunner) LookPath(name string) (string, error) {
-	return exec.LookPath(name)
-}
+// guardRootAction 是内核提权通道调用面；nil 表示内核未注入 KORE_KERNEL_SOCK
+// （旧内核 / 独立调试）→ 状态读取按降级处理，不假装能读。
+// 单测在 TestMain 里置 nil，避免读宿主机真实环境。
+var guardRootAction rootActionFunc = rootActionFuncFromEnv()
 
-// guardRunner 是业务侧使用的 runner 实例；单测可整体替换（用后恢复）。
-var guardRunner cmdRunner = execRunner{timeout: 5 * time.Second}
-
-// fail2banState 是 fail2ban 探测结果；Installed=false 表示命令不存在（未安装）。
+// fail2banState 是 fail2ban 探测结果；Installed=false 表示声明路径不存在（未安装，
+// 或装在别处而提权动作同样会失败）。
 type fail2banState struct {
 	Installed       bool
 	Active          bool
-	Version         string
 	CurrentlyBanned int
 	BannedIPs       []string
+	// Channel 报告探测时 root-action 通道是否可用；ProbeErr 是失败原因（内部诊断，不进 JSON）。
+	Channel  bool
+	ProbeErr string
 }
 
-// probeFail2ban 探测 fail2ban：LookPath 判安装，`fail2ban-client status` 判可用，
-// `status sshd` 解析 sshd jail 的当前封禁计数与 IP 清单。任何一步失败都如实降级，不抛错。
-func probeFail2ban(r cmdRunner) fail2banState {
-	var st fail2banState
-	if _, err := r.LookPath("fail2ban-client"); err != nil {
-		return st // 未安装：engine 走 sshd 日志降级
+// probeFail2ban 探测 fail2ban：
+//  1. 声明路径存在且可执行 → Installed=true；
+//  2. 经内核 root 通道执行声明动作 fail2ban-status（固定 argv：status sshd）；
+//  3. 退出码 0 → Active=true 并解析 sshd jail 的封禁计数与 IP 清单。
+//
+// 任何一步失败都如实降级（Active=false + ProbeErr），不抛错、不编造数据。
+func probeFail2ban(call rootActionFunc) fail2banState {
+	st := fail2banState{Channel: call != nil}
+	if _, err := lookPath(fail2banClientPath); err != nil {
+		return st // 声明路径不存在：未安装态（engine 走 sshd 日志降级）
 	}
 	st.Installed = true
-	if _, err := r.Run("fail2ban-client", "status"); err != nil {
-		return st // 已安装但 socket 不可访问（通常需 root）→ 按 sshd 日志降级
+	if call == nil {
+		return st // 已安装但通道未注入：无法读取状态，hint 指向缺失的提权通道
+	}
+	out, err := call(rootActionFail2banStatus, nil)
+	if err != nil {
+		st.ProbeErr = err.Error()
+		return st
+	}
+	if out.ExitCode != 0 {
+		reason := firstLine(out.Stderr)
+		if reason == "" {
+			st.ProbeErr = fmt.Sprintf("%s 退出码 %d", rootActionFail2banStatus, out.ExitCode)
+		} else {
+			st.ProbeErr = fmt.Sprintf("%s 退出码 %d：%s", rootActionFail2banStatus, out.ExitCode, reason)
+		}
+		return st
 	}
 	st.Active = true
-	if version, err := r.Run("fail2ban-client", "version"); err == nil {
-		st.Version = firstLine(version)
-	}
-	if jail, err := r.Run("fail2ban-client", "status", "sshd"); err == nil {
-		st.CurrentlyBanned, st.BannedIPs = parseFail2banJail(jail)
-	}
+	st.CurrentlyBanned, st.BannedIPs = parseFail2banJail(out.Stdout)
 	return st
 }
 
@@ -130,8 +131,8 @@ func firstLine(text string) string {
 
 // detectProtection 检测防护源：fail2ban（活跃则为主引擎）+ sshd 日志（降级统计源）。
 // available = fail2ban 活跃 或 任一日志源可读；两者皆无 → engine=none、available=false。
-func detectProtection(g guardConfig, r cmdRunner) protectionInfo {
-	st := probeFail2ban(r)
+func detectProtection(g guardConfig, call rootActionFunc) protectionInfo {
+	st := probeFail2ban(call)
 	since := time.Now().Add(-24 * time.Hour)
 	lines, source, _, _ := collectLogLines(g, since)
 	events := parseEvents(lines)
@@ -139,7 +140,6 @@ func detectProtection(g guardConfig, r cmdRunner) protectionInfo {
 	info := protectionInfo{
 		Fail2banInstalled: st.Installed,
 		Fail2banActive:    st.Active,
-		EngineVersion:     st.Version,
 		BannedCount:       st.CurrentlyBanned,
 		Failed24h:         stats.Failed,
 		LogSource:         source,
@@ -161,9 +161,11 @@ func protectionHint(st fail2banState, source string, g guardConfig) string {
 	var parts []string
 	switch {
 	case !st.Installed:
-		parts = append(parts, "fail2ban 未安装；以 sshd 日志统计为降级源（只读，不执行封禁）。如需封禁可安装 fail2ban（apt/dnf install fail2ban）")
+		parts = append(parts, "fail2ban 未安装（提权声明路径 "+fail2banClientPath+" 不存在）；以 sshd 日志统计为降级源（只读，不执行封禁）。如需封禁可安装 fail2ban（apt/dnf install fail2ban）；若已装在 /usr/local/bin 等其它路径，请创建符号链接 ln -s <实际路径> "+fail2banClientPath+" 后重启插件")
+	case !st.Active && st.ProbeErr != "":
+		parts = append(parts, "fail2ban 已安装但状态读取失败（提权动作 "+rootActionFail2banStatus+"）："+st.ProbeErr+"；请确认 kored 以 root 启动且 systemd 提权通道可用；已降级为 sshd 日志统计")
 	case !st.Active:
-		parts = append(parts, "fail2ban 已安装但客户端无法访问其 socket（通常需要 root 或 adm 组权限）；按 sshd 日志降级统计")
+		parts = append(parts, "fail2ban 已安装，但内核未注入 root-action 通道（KORE_KERNEL_SOCK 缺省）；状态读取经提权动作 "+rootActionFail2banStatus+"，通道缺失时无法读取（插件进程内不再直呼 fail2ban-client）；已降级为 sshd 日志统计")
 	}
 	if source == "none" {
 		parts = append(parts, "auth.log（"+g.LogPath+"）与 journalctl 均不可读，攻击统计不可用；可将本进程加入 adm 组或以可读日志的账号运行 kored")

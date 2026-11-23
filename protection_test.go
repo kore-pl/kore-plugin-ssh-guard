@@ -10,56 +10,62 @@ import (
 	"time"
 )
 
-// fakeRunner 是 cmdRunner 的内存实现：按命令名返回预置输出，用于单测注入。
-type fakeRunner struct {
-	paths    map[string]string // LookPath 结果；缺省返回 exec.ErrNotFound
-	outputs  map[string]string // Run 输出；key 为空格连接的 argv
-	failures map[string]error  // Run 失败；key 同上
+// fakeRootAction 是 rootActionFunc 的内存实现：记录被调用的 action id，返回预置输出。
+type fakeRootAction struct {
+	calls  []string
+	output rootActionOutput
+	err    error
 }
 
-func (f *fakeRunner) LookPath(name string) (string, error) {
-	if path, ok := f.paths[name]; ok {
-		return path, nil
+func (f *fakeRootAction) call(actionID string, args []string) (rootActionOutput, error) {
+	f.calls = append(f.calls, actionID)
+	return f.output, f.err
+}
+
+// fail2banJailFixture 是 `fail2ban-client status sshd` 的最小可解析输出。
+const fail2banJailFixture = "Status for the jail: sshd\n" +
+	"|- Filter\n" +
+	"|  |- Currently failed: 0\n" +
+	"`- Actions\n" +
+	"   |- Currently banned: 2\n" +
+	"   |- Total banned:     7\n" +
+	"   `- Banned IP list:   203.0.113.7 198.51.100.9"
+
+// stubLookPath 替换 lookPath 并记录被查询的路径名；existing 控制声明路径是否存在/可执行。
+func stubLookPath(t *testing.T, existing bool) *[]string {
+	t.Helper()
+	asked := make([]string, 0, 2)
+	old := lookPath
+	t.Cleanup(func() { lookPath = old })
+	lookPath = func(name string) (string, error) {
+		asked = append(asked, name)
+		if !existing {
+			return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+		}
+		return name, nil
 	}
-	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+	return &asked
 }
 
-func (f *fakeRunner) Run(args ...string) (string, error) {
-	key := strings.Join(args, " ")
-	if err, ok := f.failures[key]; ok {
-		return "", err
-	}
-	return f.outputs[key], nil
-}
-
-// fakeFail2banRunner 构造一个"已安装且活跃"的 fail2ban 假环境。
-func fakeFail2banRunner() *fakeRunner {
-	return &fakeRunner{
-		paths: map[string]string{"fail2ban-client": "/usr/bin/fail2ban-client"},
-		outputs: map[string]string{
-			"fail2ban-client status":      "Status\n|- Number of jail:      1\n`- Jail list:           sshd",
-			"fail2ban-client version":     "1.1.0\n",
-			"fail2ban-client status sshd": "Status for the jail: sshd\n|- Filter\n|  |- Currently failed: 0\n`- Actions\n   |- Currently banned: 2\n   |- Total banned:     7\n   `- Banned IP list:   203.0.113.7 198.51.100.9",
-		},
-	}
-}
-
-// TestProbeFail2banNotInstalled 未安装 → 全零态（engine 走 sshd 降级）。
+// TestProbeFail2banNotInstalled 声明路径不存在 → 全零态，且只查声明绝对路径（不问 PATH 裸名）。
 func TestProbeFail2banNotInstalled(t *testing.T) {
-	st := probeFail2ban(&fakeRunner{})
+	asked := stubLookPath(t, false)
+	st := probeFail2ban(nil)
 	if st.Installed || st.Active || st.CurrentlyBanned != 0 || len(st.BannedIPs) != 0 {
 		t.Fatalf("未安装应全零：%+v", st)
 	}
+	if len(*asked) != 1 || (*asked)[0] != fail2banClientPath {
+		t.Fatalf("只应探测声明绝对路径 %q，实际 %v", fail2banClientPath, *asked)
+	}
 }
 
-// TestProbeFail2banActive 已安装且活跃 → 版本、封禁计数与 IP 清单完整解析。
-func TestProbeFail2banActive(t *testing.T) {
-	st := probeFail2ban(fakeFail2banRunner())
-	if !st.Installed || !st.Active {
-		t.Fatalf("应为安装且活跃：%+v", st)
-	}
-	if st.Version != "1.1.0" {
-		t.Fatalf("version=%q 期望 1.1.0", st.Version)
+// TestProbeFail2banViaRootAction 已安装 + 通道成功 → 经 fail2ban-status 读取并解析 jail。
+func TestProbeFail2banViaRootAction(t *testing.T) {
+	stubLookPath(t, true)
+	fake := &fakeRootAction{output: rootActionOutput{Stdout: fail2banJailFixture}}
+	st := probeFail2ban(fake.call)
+	if !st.Installed || !st.Active || !st.Channel {
+		t.Fatalf("应为安装且活跃（经通道）：%+v", st)
 	}
 	if st.CurrentlyBanned != 2 {
 		t.Fatalf("Currently banned 解析=%d 期望 2", st.CurrentlyBanned)
@@ -67,23 +73,72 @@ func TestProbeFail2banActive(t *testing.T) {
 	if len(st.BannedIPs) != 2 || st.BannedIPs[0] != "203.0.113.7" {
 		t.Fatalf("Banned IP list 解析=%v", st.BannedIPs)
 	}
-}
-
-// TestProbeFail2banSocketDenied 已安装但 socket 不可访问 → installed=true, active=false（如实降级）。
-func TestProbeFail2banSocketDenied(t *testing.T) {
-	r := &fakeRunner{
-		paths:    map[string]string{"fail2ban-client": "/usr/bin/fail2ban-client"},
-		failures: map[string]error{"fail2ban-client status": errors.New("exit status 255: ERROR:FAILED to connect to fail2ban socket")},
+	if len(fake.calls) != 1 || fake.calls[0] != rootActionFail2banStatus {
+		t.Fatalf("应调用声明的 %q，实际 %v", rootActionFail2banStatus, fake.calls)
 	}
-	st := probeFail2ban(r)
-	if !st.Installed || st.Active || st.CurrentlyBanned != 0 {
-		t.Fatalf("socket 拒绝应按不活跃降级：%+v", st)
+	if st.ProbeErr != "" {
+		t.Fatalf("成功态不应有错误：%q", st.ProbeErr)
 	}
 }
 
-// TestDetectProtectionSshdFallback fail2ban 未装 + auth.log 可读 → engine=sshd、available=true、失败计数入账。
+// TestProbeFail2banChannelUnavailable 已安装但内核未注入通道 → installed=true/active=false，
+// hint 指向缺失的 root-action 通道与动作 id（不再进程内直呼客户端）。
+func TestProbeFail2banChannelUnavailable(t *testing.T) {
+	stubLookPath(t, true)
+	st := probeFail2ban(nil)
+	if !st.Installed || st.Active || st.Channel {
+		t.Fatalf("通道缺失应为已安装/未活跃：%+v", st)
+	}
+	g := guardConfig{LogPath: filepath.Join(t.TempDir(), "missing.log"), LogSource: "auth",
+		SuspiciousThreshold: 10, RawTailLimit: 200}
+	info := detectProtection(g, nil)
+	if !strings.Contains(info.Hint, "KORE_KERNEL_SOCK") || !strings.Contains(info.Hint, rootActionFail2banStatus) {
+		t.Fatalf("hint 应指明缺失通道与动作 id：%q", info.Hint)
+	}
+}
+
+// TestProbeFail2banChannelError 通道报 E_NEED_ROOT → active=false，原因进入 hint。
+func TestProbeFail2banChannelError(t *testing.T) {
+	stubLookPath(t, true)
+	fake := &fakeRootAction{err: errors.New("E_NEED_ROOT: 需要 root 权限：请用 sudo/systemd 启动 kored（用 `sudo kored` 启动）")}
+	st := probeFail2ban(fake.call)
+	if !st.Installed || st.Active {
+		t.Fatalf("通道失败应为已安装/未活跃：%+v", st)
+	}
+	if !strings.Contains(st.ProbeErr, "E_NEED_ROOT") {
+		t.Fatalf("ProbeErr 应保留内核错误码：%q", st.ProbeErr)
+	}
+	g := guardConfig{LogPath: filepath.Join(t.TempDir(), "missing.log"), LogSource: "auth",
+		SuspiciousThreshold: 10, RawTailLimit: 200}
+	info := detectProtection(g, fake.call)
+	if info.Fail2banActive {
+		t.Fatalf("通道失败不应报活跃：%+v", info)
+	}
+	if !strings.Contains(info.Hint, "E_NEED_ROOT") || !strings.Contains(info.Hint, rootActionFail2banStatus) {
+		t.Fatalf("hint 应含错误码与动作 id：%q", info.Hint)
+	}
+}
+
+// TestProbeFail2banExitNonZero 通道执行成功但命令退出码非 0 → 未活跃 + 原因含 stderr 首行。
+func TestProbeFail2banExitNonZero(t *testing.T) {
+	stubLookPath(t, true)
+	fake := &fakeRootAction{output: rootActionOutput{
+		ExitCode: 255,
+		Stderr:   "ERROR:FAILED to connect to fail2ban socket\n（更多输出略）",
+	}}
+	st := probeFail2ban(fake.call)
+	if !st.Installed || st.Active {
+		t.Fatalf("非零退出码应为已安装/未活跃：%+v", st)
+	}
+	if !strings.Contains(st.ProbeErr, "退出码 255") || !strings.Contains(st.ProbeErr, "FAILED to connect") {
+		t.Fatalf("ProbeErr 应含退出码与 stderr 首行：%q", st.ProbeErr)
+	}
+}
+
+// TestDetectProtectionSshdFallback fail2ban 未装 + auth.log 可读 → engine=sshd、available=true。
 // 日志时间戳取"当前时间往前 1 小时"确保落在 failed_24h 窗口内（不依赖具体日期）。
 func TestDetectProtectionSshdFallback(t *testing.T) {
+	stubLookPath(t, false)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "auth.log")
 	ts := func(offset time.Duration) string {
@@ -99,7 +154,7 @@ func TestDetectProtectionSshdFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := guardConfig{LogPath: path, LogSource: "auth", SuspiciousThreshold: 10, RawTailLimit: 200}
-	info := detectProtection(g, &fakeRunner{}) // fake runner：fail2ban 未安装
+	info := detectProtection(g, nil) // 通道未注入：fail2ban 未安装态
 	if !info.Available || info.Engine != "sshd" {
 		t.Fatalf("降级源应可用且 engine=sshd：%+v", info)
 	}
@@ -114,10 +169,12 @@ func TestDetectProtectionSshdFallback(t *testing.T) {
 	}
 }
 
-// TestDetectProtectionNone 日志不可读 + fail2ban 未装 → available=false、engine=none、hint 给可操作路径。
+// TestDetectProtectionNone 日志不可读 + fail2ban 未装 → available=false、engine=none、hint 可操作。
 func TestDetectProtectionNone(t *testing.T) {
-	g := guardConfig{LogPath: filepath.Join(t.TempDir(), "missing.log"), LogSource: "auth", SuspiciousThreshold: 10, RawTailLimit: 200}
-	info := detectProtection(g, &fakeRunner{})
+	stubLookPath(t, false)
+	g := guardConfig{LogPath: filepath.Join(t.TempDir(), "missing.log"), LogSource: "auth",
+		SuspiciousThreshold: 10, RawTailLimit: 200}
+	info := detectProtection(g, nil)
 	if info.Available || info.Engine != "none" || info.LogSource != "none" {
 		t.Fatalf("应如实报不可用：%+v", info)
 	}
@@ -126,26 +183,33 @@ func TestDetectProtectionNone(t *testing.T) {
 	}
 }
 
-// TestDetectProtectionFail2banPrimary fail2ban 活跃 → engine=fail2ban、封禁计数取自 jail。
+// TestDetectProtectionFail2banPrimary fail2ban 经通道读取成功 → engine=fail2ban、计数取自 jail。
 func TestDetectProtectionFail2banPrimary(t *testing.T) {
-	g := guardConfig{LogPath: filepath.Join(t.TempDir(), "missing.log"), LogSource: "auth", SuspiciousThreshold: 10, RawTailLimit: 200}
-	info := detectProtection(g, fakeFail2banRunner())
+	stubLookPath(t, true)
+	fake := &fakeRootAction{output: rootActionOutput{Stdout: fail2banJailFixture}}
+	g := guardConfig{LogPath: filepath.Join(t.TempDir(), "missing.log"), LogSource: "auth",
+		SuspiciousThreshold: 10, RawTailLimit: 200}
+	info := detectProtection(g, fake.call)
 	if !info.Available || info.Engine != "fail2ban" {
 		t.Fatalf("fail2ban 活跃应为可用主引擎：%+v", info)
 	}
 	if info.BannedCount != 2 || !info.Fail2banActive || !info.Fail2banInstalled {
 		t.Fatalf("封禁计数/标志不符：%+v", info)
 	}
-	if info.EngineVersion != "1.1.0" {
-		t.Fatalf("version=%q", info.EngineVersion)
+	if info.EngineVersion != "" {
+		t.Fatalf("经通道读取不填充 version（status sshd 输出不含版本），实际 %q", info.EngineVersion)
 	}
 }
 
-// TestProtectionHintUninstalled 校验诚实口径：未安装必须写"fail2ban 未安装；以 sshd 日志统计为降级源"。
+// TestProtectionHintUninstalled 校验诚实口径：未安装写"fail2ban 未安装；以 sshd 日志统计为降级源"，
+// 并给出声明路径（跨发行版缺路径时的可操作线索）。
 func TestProtectionHintUninstalled(t *testing.T) {
 	hint := protectionHint(fail2banState{}, "auth", defaultGuardConfig())
 	if !strings.Contains(hint, "fail2ban 未安装") || !strings.Contains(hint, "以 sshd 日志统计为降级源") {
 		t.Fatalf("hint 缺诚实口径：%q", hint)
+	}
+	if !strings.Contains(hint, fail2banClientPath) {
+		t.Fatalf("hint 应含声明的绝对路径：%q", hint)
 	}
 }
 

@@ -75,6 +75,11 @@ func (p *banParams) UnmarshalJSON(raw []byte) error {
 }
 
 // protectionInfo 是 ssh.status 里 protection 字段的防护源检测结果（ADR-0018 降级口径）。
+//
+// EngineVersion（JSON 名 version）：0.2.1 起状态读取统一经 root 通道的
+// `fail2ban-client status sshd` 固定 argv，其输出不含版本号；不为展示字段新增提权动作，
+// 故该字段保留为空串（schema 兼容，不编造版本）。需要版本时由运维在宿主执行
+// `fail2ban-client --version` 查看。
 type protectionInfo struct {
 	Available         bool   `json:"available"`
 	Engine            string `json:"engine"` // "fail2ban" | "sshd" | "none"

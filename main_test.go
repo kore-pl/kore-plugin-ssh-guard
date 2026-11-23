@@ -6,11 +6,23 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 
 	"github.com/pengtang1024/kore/pkg/pluginapi"
 )
+
+// TestMain 为整包设定确定性的探测桩：默认「fail2ban 未安装 + root 通道未注入」，
+// 避免单测读宿主机真实环境（fail2ban 安装状态 / KORE_KERNEL_SOCK）。
+// 各用例用 stubLookPath / fakeRootAction 自行覆盖，t.Cleanup 恢复到这里的默认值。
+func TestMain(m *testing.M) {
+	guardRootAction = nil
+	lookPath = func(string) (string, error) {
+		return "", &exec.Error{Name: "fail2ban-client", Err: exec.ErrNotFound}
+	}
+	os.Exit(m.Run())
+}
 
 // testConfig 构造握手与会话循环共用的一致配置（不依赖环境变量）。
 // guard 与真实 loadConfig 一致：从缺省值起底（不读环境，保证测试确定性）。

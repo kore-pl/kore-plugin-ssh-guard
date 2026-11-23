@@ -102,7 +102,7 @@ func handleStatus(raw json.RawMessage, cfg *config, response *pluginapi.Response
 		Total:      len(checks),
 		Issues:     issues,
 		Applied:    false,
-		Protection: protectionPtr(detectProtection(cfg.guard, guardRunner)),
+		Protection: protectionPtr(detectProtection(cfg.guard, guardRootAction)),
 	})
 	return nil
 }
@@ -300,7 +300,7 @@ func handleBans(raw json.RawMessage, cfg *config, response *pluginapi.Response) 
 	if perr != nil {
 		return perr
 	}
-	st := probeFail2ban(guardRunner)
+	st := probeFail2ban(guardRootAction)
 	if st.Active {
 		bans := make([]banItem, 0, len(st.BannedIPs))
 		for _, ip := range st.BannedIPs {
@@ -451,12 +451,12 @@ func handleBanWrite(raw json.RawMessage, verb string, response *pluginapi.Respon
 	if net.ParseIP(p.IP) == nil {
 		return invalidParam("ip 不是合法 IP 地址")
 	}
-	action := "fail2ban-banip"
+	action := rootActionFail2banBanIP
 	if verb == "ban.remove" {
-		action = "fail2ban-unbanip"
+		action = rootActionFail2banUnbanIP
 	}
 	detail, _ := json.Marshal(rootHintDetail{
-		Hint:       "解封/加封需宿主 root 权限（" + action + " 经 fail2ban-client 执行）。两条路径：① 用 sudo 启动 kored，让内核经 systemd 提权代理执行；② 按 docs/RUNBOOK.md 为插件配置 systemd 提权。声明的 root_actions 见 info.json（需启用时逐条确认）",
+		Hint:       "解封/加封需宿主 root 权限（" + action + " 经内核提权通道以固定 argv 执行 fail2ban-client）。两条路径：① 用 sudo 启动 kored，让内核经 systemd 提权代理执行；② 按 docs/RUNBOOK.md 为插件配置 systemd 提权。fail2ban-banip 为不可逆动作（需一次性 confirm 令牌），fail2ban-unbanip 为恢复性动作（可再次封禁回滚，无需令牌）。声明的 root_actions 见 info.json（需启用时逐条确认）",
 		RootAction: action,
 	})
 	return &pluginapi.Error{

@@ -2,6 +2,38 @@
 
 本仓库遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
+## [0.2.1] - 2026-11-23
+
+### 修复（0.2.0 只读复核发现的三项技术债）
+
+- **`fail2ban-status` 声明未使用（P1）**：`ssh.status` / `ssh.bans` 的 fail2ban 探测改为经内核
+  root-action 通道执行声明的 `fail2ban-status`（固定 argv `/usr/bin/fail2ban-client status sshd`），
+  进程内不再直呼 `fail2ban-client`。代码常量 `rootActionFail2banStatus` 被真实引用，声明与行为一致；
+  通道未注入 / 报 `E_NEED_ROOT` / 非零退出码时如实降级为 sshd 日志统计，并在 hint 里指明缺失通道与动作 id。
+  `version` 字段因 `status sshd` 输出不含版本而留空（schema 兼容，不编造、不为展示字段新增提权动作）。
+- **路径口径分裂（P1）**：`info.json` 与代码统一为唯一绝对路径常量 `/usr/bin/fail2ban-client`
+  （`fail2ban-client` 不在协议 `RootCommandAllowlist` 内，声明侧无法用裸命令名）；进程内只用
+  `exec.LookPath(该绝对路径)` 判断可执行性，不向 PATH 回退、不执行；执行只经内核 `systemd-run -- <声明 argv>`。
+  声明路径不存在时明确报"未安装"并给符号链接提示，消除「进程内探测成功、提权动作却失败」的语义分裂。
+- **`fail2ban-unbanip` 的 `irreversible` 语义（P2）**：解封是恢复性动作（可再次封禁回滚），
+  去掉 `irreversible: true`，不再强制一次性 confirm 令牌；`fail2ban-banip` 保留不可逆（可能影响合法访问者）。
+  内核语义已核实：`irreversible` 只决定 confirm 令牌核销/签发（`privilege/service.go`、
+  `httpapi/handlers_rootaction.go`），不是身份边界——解封仍走 `system:admin` + 审计 + systemd 提权；
+  对 unbanip 调 confirm-token 端点会返回 `E_INVALID`（UI 不得再申请令牌）。
+
+### 新增
+
+- root-action 通道客户端（`rootaction_client.go`）：`KORE_KERNEL_SOCK` + `KORE_PLUGIN_TOKEN` +
+  `KORE_PLUGIN_ID` 三要素齐备时经内核 UDS/HTTP 调用自身声明的 root 动作；缺一降级。
+- 声明↔代码一致性测试：`info.json` 每条 root action 的 id 与 `argv[0]` 必须与代码常量逐字一致；
+  `irreversible` 集合（status=false / banip=true / unbanip=false）、manifest 与 info.json 握手字段防漂移。
+- 通道客户端真实 UDS+HTTP 契约测试（bearer、action_id、退出码透传、`E_NEED_ROOT` 错误体与 hint）。
+
+### 变更
+
+- `README` 同步：状态读取走 root 通道、路径口径与跨发行版代价、`irreversible` 语义与影响面、
+  `KORE_KERNEL_SOCK` 环境变量。
+
 ## [0.2.0] - 2026-11-23
 
 ### 新增

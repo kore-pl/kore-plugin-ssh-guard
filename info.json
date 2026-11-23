@@ -1,40 +1,61 @@
 {
   "id": "ssh-guard",
   "name": "SSH 加固插件",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "protocol": "kore.plugin.v1",
   "lifecycle": "lazy",
   "depth_level": "basic",
   "entry": "bin/ssh-guard",
-  "capabilities": ["system:admin"],
+  "capabilities": [
+    "system:admin"
+  ],
   "triggers": [],
   "requires_kore": ">=0.1.0 <0.2.0",
-  "resources": {"memory_mb": 6, "cpu_quota": "10%", "pids_max": 16},
+  "resources": {
+    "memory_mb": 6,
+    "cpu_quota": "10%",
+    "pids_max": 16
+  },
   "depends_on": [],
   "conflicts": [],
-  "scenario_tags": ["sec"],
-  "size_bytes": 1474807,
+  "scenario_tags": [
+    "sec"
+  ],
+  "size_bytes": 2803976,
   "requires_root": true,
   "root_actions": [
     {
       "id": "fail2ban-status",
-      "argv": ["/usr/bin/fail2ban-client", "status", "sshd"],
+      "argv": [
+        "/usr/bin/fail2ban-client",
+        "status",
+        "sshd"
+      ],
       "timeout_s": 10,
-      "description": "读取 fail2ban sshd jail 的封禁状态（只读，用于状态页展示）"
+      "description": "经内核提权通道读取 fail2ban sshd jail 的封禁状态（只读；插件进程不再直呼 fail2ban-client）"
     },
     {
       "id": "fail2ban-banip",
-      "argv": ["/usr/bin/fail2ban-client", "set", "sshd", "banip"],
+      "argv": [
+        "/usr/bin/fail2ban-client",
+        "set",
+        "sshd",
+        "banip"
+      ],
       "timeout_s": 10,
-      "description": "封禁 IP：追加参数为 IP 地址（如 203.0.113.7）。可能影响合法访问者",
+      "description": "封禁 IP：追加参数为 IP 地址（如 203.0.113.7）。不可逆动作，执行前需一次性 confirm 令牌；可能影响合法访问者",
       "irreversible": true
     },
     {
       "id": "fail2ban-unbanip",
-      "argv": ["/usr/bin/fail2ban-client", "set", "sshd", "unbanip"],
+      "argv": [
+        "/usr/bin/fail2ban-client",
+        "set",
+        "sshd",
+        "unbanip"
+      ],
       "timeout_s": 10,
-      "description": "解封 IP：追加参数为 IP 地址（如 203.0.113.7）。解除 fail2ban 封禁",
-      "irreversible": true
+      "description": "解封 IP：追加参数为 IP 地址（如 203.0.113.7）。恢复性动作（可再次封禁回滚），无需一次性 confirm 令牌"
     }
   ]
 }
