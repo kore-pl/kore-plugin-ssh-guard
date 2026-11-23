@@ -220,6 +220,11 @@ make check   # gofmt → go vet → go test -timeout 200s
 - `tests/fault/`：真实二进制 + UDS 的黑盒故障注入四类——`kill -9`、hello 超时、
   垃圾帧（解码失败即断开）、超帧前缀（> 8 MiB 立即拒绝）。
   磁盘满 / cgroup 超限等故障延 v1.1（基础级边界用例延后，核心路径可用）。
+- **深度等级 `basic`（0.3.1 起，与索引 / `security` 预设一致）**：上述四类只覆盖**会话与协议层**；
+  `suggest` / `status` / `attempts` / `bans` / `config.*` 等业务方法**零故障注入用例**。
+  升级为 `production` 需补齐方法级覆盖（`suggest` 的 kill / timeout / 磁盘只读各至少一类），
+  见 v1.1 计划。`suggest` 是只读建议方法（`dry_run` 恒 true，不写宿主），磁盘只读仅能验证
+  “读不到配置时降级并说明原因”，故其故障注入优先级低于封禁写路径。
 
 本地联调依赖**不提交**的 `go.work`（`use .` + `use ../kore/pkg/pluginapi`）；跨仓 `replace` 禁止写入 `go.mod`（G-17）。
 
@@ -232,7 +237,7 @@ make check   # gofmt → go vet → go test -timeout 200s
 - 封禁执行已在 0.2.2 落地（`banip` / `unbanip` 经提权通道真实执行 + 回读校验）；
   仅"提权成功路径的真机 e2e"仍依赖 root + systemd 环境（本仓单测用替身通道覆盖 argv 与回读）。
 - 封禁持久化视图与 fail2ban 联动策略配置（当前 config.set 不落盘）。
-- 生产级四类故障注入（磁盘满、cgroup 超限）与预设"开箱可用"标记。
+- 生产级故障注入：方法级（`suggest` / `ban.*` 等）kill / timeout / 磁盘只读用例；以及预设"开箱可用"标记。
 
 <!-- oss:begin -->
 ## 开源与贡献
@@ -247,7 +252,7 @@ make check   # gofmt → go vet → go test -timeout 200s
 - **贡献**：[CONTRIBUTING.md](CONTRIBUTING.md)（构建、门禁、发版、边界）。
 - **安全**：[SECURITY.md](SECURITY.md)——漏洞不要开公开 issue。
 - **行为准则**：[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
-- **兼容性**：`protocol: kore.plugin.v1` · `requires_kore: >=0.1.0 <0.2.0` · `lifecycle: lazy` · 深度等级 `production`。
+- **兼容性**：`protocol: kore.plugin.v1` · `requires_kore: >=0.1.0 <0.2.0` · `lifecycle: lazy` · 深度等级 `basic`（0.3.1 起；`production` 需先补方法级故障注入，见 v1.1）。
 - **验证方式**：本地 `make check` 优先（CI 只在 push main / tag / PR / 手动跑；发布前 `make dist` 连跑两次核对 sha 一致）。
 - **发布产物**：`make dist` → `dist/ssh-guard-0.2.3.tar.gz` + `.sha256`（位级可复现，连跑两次 sha 相同）。
 - **相关仓库**：[索引 kore-plugins](https://github.com/kore-pl/kore-plugins) · [协议文档](https://github.com/kore-pl/kore/blob/main/docs/PLUGIN-PROTOCOL.md) · [SDK 指南](https://github.com/kore-pl/kore/blob/main/docs/PLUGIN-SDK.md)

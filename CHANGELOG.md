@@ -2,6 +2,24 @@
 
 本仓库遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
+## [0.3.1] - 2026-11-23
+
+### 修复（声明与事实对齐，G-20）
+
+- **`depth_level` `production` → `basic`**：0.2.3 按“故障注入测试已覆盖”升为 production，但 `tests/fault/`
+  实际只有 4 个**会话/协议层**用例（`kill -9`、hello 超时、垃圾帧、超帧前缀），`suggest` / `status` /
+  `attempts` / `bans` / `config.*` 等业务方法**零故障注入用例**；文件头自注“basic 级的磁盘满 / cgroup 超限
+  故障延 v1.1”。production 是给用户看的等级声明，虚标即误导，故按事实降为 basic。
+- 与已发布口径对齐：`kore-plugins/index/plugins.json` 与 `presets/security.json` 早已按 `basic` /
+  “非开箱可用”收录本插件（本条只是消除仓库内的不一致）。
+
+### 边界（升级为 production 的前置条件，v1.1）
+
+- 需在 `tests/fault/` 补齐**方法级**故障注入：至少 `suggest` 的 kill / timeout / 磁盘只读各一类，
+  断言错误码语义正确、不 panic、不写宿主；`suggest` 本体是纯只读（`dry_run` 恒 true，最多 best-effort
+  读一次 `/etc/ssh/sshd_config`），磁盘只读对其只能验证降级路径（`path_hint` 说明原因），收益有限，
+  因此不作为本轮阻断项。
+
 ## [0.3.0] - 2026-11-23
 
 ### 新增（sshd 加固建议态，非自动下发）
