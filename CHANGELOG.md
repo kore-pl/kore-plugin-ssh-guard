@@ -2,6 +2,54 @@
 
 本仓库遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
+## [0.2.2] - 2026-11-23
+
+### 新增（封禁执行落地，§2「仍缺」的最后一块）
+
+- **`ssh.ban.add` / `ssh.ban.remove` 真实执行**（0.2.1 之前 `handleBanWrite` 恒返 `E_NEED_ROOT`，只声明不执行）：
+  经内核 root-action 通道执行 `info.json` 声明的固定 argv
+  `/usr/bin/fail2ban-client set sshd banip|unbanip <ip>`。插件仍以非 root 运行、永不提权（ADR-0018）；
+  argv 由清单锁死，IP 只能作为**唯一**追加参数，内核按协议 `shapeIPOrCIDR` 复核。
+- **执行后回读证明**：`banip` / `unbanip` 成功后自动经 `fail2ban-status` 动作回读 sshd jail，返回
+  `{ip, action, applied, exit_code, stdout, stderr, banned, banned_count, verified, note}`。
+  `applied` = 命令已执行且退出码 0；`verified` = 回读状态与预期一致；回读不可用或与预期不符时
+  `verified=false` + `note` 说明原因，**不假装生效**。
+- **不可逆动作一次性令牌**：`ban.add` 缺少 `confirm` 时直接 `E_UNAUTHORIZED` + hint
+  （给出 `GET /api/v1/plugins/ssh-guard/root-action/fail2ban-banip/confirm-token` 的取用路径），
+  且**不发起任何命令**；令牌由管理员会话签发（插件 bearer 无权自签），插件只原样转发给内核核销。
+  `ban.remove`（unbanip）仍是恢复性动作、无需令牌（0.2.1 语义保持不变）。
+- **IP 注入双防线**：插件侧 `net.ParseIP` 收窄为纯 IP 字面量并归一化（拒绝 CIDR、通配 `*`、`all`、
+  分号、空格、换行、`$()`、反引号），通过后作为唯一追加参数下发；内核侧再按 `shapeIPOrCIDR` 复核。
+  两层各有表驱动测试（11 类注入串 / SDK `ValidateRootAppendedArgv`）。
+- **降权可用性显式化**：`ssh.status` 新增 `config_source`（`request` / `host` / `none`）与降级 `note`。
+  插件以非 root 运行、读不了真实 `/etc/ssh/sshd_config`（通常 0600 root:root），提权通道的命令白名单里
+  也没有 `cat` / `sshd` 形状；因此"没拿到文本"必须显式暴露成 `none`，不能让调用方把 5 条
+  `(未设置)` 误读成"宿主配置不合规"。
+- 通道客户端支持 `confirm` 透传：`rootActionFunc` 增加第三个参数，`rootActionRequest` 增加
+  `confirm,omitempty`（只读与可逆动作传空串）。
+
+### 变更（方法级 capability，§3.5 #12）
+
+- `info.json` 新增 `method_capabilities` **8 条**：只读 5 条（`status` / `attempts` / `bans` /
+  `ban.list` / `config.get`）→ `system:read`；写 3 条（`ban.add` / `ban.remove` / `config.set`）→ `system:admin`。
+  只读调用（含配置读取）不再按插件级 `system:admin` 写 `invoke.*` 审计；写方法仍按 admin 审计。
+- 三条 root action 的 `description` 补真实执行 / 回读语义；`id`、`argv`、`irreversible` 集合
+  （status=false / banip=true / unbanip=false）与路径口径 `/usr/bin/fail2ban-client` 均未变。
+- 版本号 0.2.1 → 0.2.2（patch：补方法级能力声明 + 落地已声明的写动作 + 新增只读字段），
+  `manifest.json`（内嵌 manifest）同步 bump。
+
+### 测试
+
+- 新增 `banwrite_test.go`（11 个测试函数 / 19 个子用例）：方法级 capability 表驱动（8 条、键域、
+  只读/写分类、与 `businessVerb` 双向对齐）、封禁执行链路（调用顺序 `banip` → `status`、
+  追加参数恰为单个 IP、confirm 原样转发、`verified=true`）、`ban.add` 缺令牌零命令、
+  `ban.remove` 无令牌可执行且回读确认已移除、11 类 IP 注入全部 `E_INVALID` 且不触发通道、
+  SDK 形状复核（合法 IPv4/IPv6 通过、注入串被拒）、内核错误码保留、退出码非 0 显式失败、
+  回读不可用 / 回读不符两条降级路径、`config_source` 三态与降级 note。
+- `rootaction_client_test.go` 新增 confirm 透传契约测试（真实 UDS+HTTP 请求体断言）。
+- `protection_test.go` 的 fake 通道扩展为记录追加参数与 confirm，并支持按调用顺序返回
+  （执行 → 回读两步）。
+
 ## [0.2.1] - 2026-11-23
 
 ### 修复（0.2.0 只读复核发现的三项技术债）

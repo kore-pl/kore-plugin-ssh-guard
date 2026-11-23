@@ -14,6 +14,15 @@ type statusAuditResult struct {
 	Applied    bool         `json:"applied"`
 	// Protection 是防护源检测结果（fail2ban / sshd 日志降级）；0.2.0 新增。
 	Protection *protectionInfo `json:"protection,omitempty"`
+	// ConfigSource 是本次审计文本的来源，取值 request（params.sshd_config）/
+	// host（supervisor 注入的 KORE_SSHD_CONFIG）/ none（未提供）；0.2.2 新增。
+	//
+	// 为什么需要它：降权后插件进程（非 root）读不了真实 /etc/ssh/sshd_config（通常 0600 root:root），
+	// 而 root_actions 的命令白名单里没有 cat/sshd 形状（协议 §3.1.4），所以"没拿到文本"必须
+	// 显式暴露成 none + note，而不是让调用方把 5 条"(未设置)"误读成"宿主配置不合规"。
+	ConfigSource string `json:"config_source"`
+	// Note 是可操作说明（仅在配置文本缺失等降级场景非空）。
+	Note string `json:"note,omitempty"`
 }
 
 // auditCheck 是单条配置审计项：指令名、当前值、是否合规、修复建议。
@@ -174,6 +183,37 @@ type configSetParams struct {
 // banWriteParams 是 ssh.ban.add / ssh.ban.remove 的入参。
 type banWriteParams struct {
 	IP string `json:"ip"`
+	// Confirm 是不可回滚动作（fail2ban-banip）的一次性 confirm 令牌：
+	// 由管理员会话向内核 confirm-token 端点申请后随本方法传入，插件原样转发给内核核销。
+	// ban.remove（unbanip）是恢复性动作，不需要令牌。
+	Confirm string `json:"confirm,omitempty"`
+}
+
+// banWriteResult 是 ssh.ban.add / ssh.ban.remove 的结果：真实执行信息 + 回读证明。
+//
+// 字段口径：
+//   - Applied=true 表示经内核提权通道的 fail2ban-client 命令已执行且退出码 0（不是"排队等待"）；
+//   - Banned / BannedCount / Verified 来自**执行后**经 fail2ban-status 动作的回读——
+//     回读不可用时 Verified=false 且 Note 说明原因（绝不假装已生效）；
+//   - Stdout / Stderr 只回首行摘要，避免把宿主输出整段塞进协议帧。
+type banWriteResult struct {
+	IP          string   `json:"ip"`
+	Action      string   `json:"action"` // fail2ban-banip | fail2ban-unbanip
+	Applied     bool     `json:"applied"`
+	ExitCode    int      `json:"exit_code"`
+	Stdout      string   `json:"stdout,omitempty"`
+	Stderr      string   `json:"stderr,omitempty"`
+	Banned      []string `json:"banned"`
+	BannedCount int      `json:"banned_count"`
+	Verified    bool     `json:"verified"`
+	Note        string   `json:"note,omitempty"`
+}
+
+// banExecErrorDetail 是封禁命令「执行了但退出码非 0」错误 Detail 的结构化载荷。
+type banExecErrorDetail struct {
+	ExitCode int    `json:"exit_code"`
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
 }
 
 // rootHintDetail 是 E_NEED_ROOT 错误 Detail 的结构化载荷。

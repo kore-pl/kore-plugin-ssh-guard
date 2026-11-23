@@ -4,6 +4,7 @@ kore 的 **SSH 加固插件**（配置审计 + 攻击统计 + 封禁视图）。
 `lifecycle = "lazy"`。0.2.0 完成 L1 → L1.5：从"注入文本审计骨架"升级为"真实日志统计 + 防护源检测 + root 动作声明"；
 0.2.1 修三项技术债：fail2ban 状态读取统一走 root 通道（声明不再空置）、路径口径统一为唯一绝对路径、
 `fail2ban-unbanip` 由不可逆改为可逆（恢复性动作不再强制一次性 confirm 令牌）。
+0.2.2 补最后两块：**封禁/解封真正经内核提权通道执行**（不再是"只声明不执行"）+ **方法级 capability 声明**（8 条）。
 
 ## 定位与边界（先说清楚不做什么）
 
@@ -16,7 +17,7 @@ kore 的 **SSH 加固插件**（配置审计 + 攻击统计 + 封禁视图）。
 - **不内置二进制**：不捆绑 fail2ban / iptables / nftables / sshd 等任何执行器。
   fail2ban 状态（只读）与封禁/解封（写）**都经内核 root-action 通道**执行 `info.json` 里声明的固定 argv；
   插件进程**不再直呼** `fail2ban-client`，自身永不提权（ADR-0018）。
-- 唯一依赖 `github.com/pengtang1024/kore/pkg/pluginapi v0.1.1`（其余为标准库）。
+- 唯一依赖 `github.com/pengtang1024/kore/pkg/pluginapi`（v0.1.3，含 root_actions schema 自检；其余为标准库）。
 
 ## 方法表
 
@@ -27,8 +28,8 @@ kore 的 **SSH 加固插件**（配置审计 + 攻击统计 + 封禁视图）。
 | `ssh-guard.bans {source?}` / `bans` | 当前封禁/可疑 IP 清单：fail2ban 经 root 通道可读时取 sshd jail；否则按可疑阈值从日志推断 |
 | `ssh-guard.config.get` / `config.get` | 读运行配置（日志路径 / 日志源 / 可疑阈值 / 原始行上限） |
 | `ssh-guard.config.set {...}` / `config.set` | 进程内改写运行配置（校验后生效；lazy 生命周期**不落盘**，进程退出回到环境变量/缺省值） |
-| `ssh-guard.ban.add {ip}` / `ban.add` | 写操作：返回 `E_NEED_ROOT` + hint + root_action 指向（不执行） |
-| `ssh-guard.ban.remove {ip}` / `ban.remove` | 写操作：同上 |
+| `ssh-guard.ban.add {ip, confirm}` / `ban.add` | **真实封禁**：经 `fail2ban-banip` root 动作执行 `fail2ban-client set sshd banip <ip>`；不可逆动作，必须带一次性 `confirm` 令牌；执行后回读封禁清单（`verified`） |
+| `ssh-guard.ban.remove {ip}` / `ban.remove` | **真实解封**：经 `fail2ban-unbanip` root 动作执行 `fail2ban-client set sshd unbanip <ip>`；恢复性动作，无需令牌；执行后回读（`verified`） |
 | `ssh-guard.ban.list` / `ban.list` | 0.1.0 兼容保留：参数校验 + 空清单回显 |
 | `kore.ping` / `kore.reload` / `kore.shutdown` | 协议必选方法；`kore.reload` 无外部配置，`config_digest` 为空 |
 
@@ -70,20 +71,61 @@ kore 的 **SSH 加固插件**（配置审计 + 攻击统计 + 封禁视图）。
 - fail2ban 活跃：解析 `fail2ban-client status sshd` 的 `Banned IP list`（`reason` 注明来源）。
 - 否则降级推断：单 IP **单自然小时**失败次数 ≥ `suspicious_threshold`（缺省 10）→ 可疑候选，
   `reason` 写明命中依据，`last_seen` 为该 IP 最后一次失败时间。
-- `applied` 恒为 `false`：本插件只读，不执行封禁。
+- `ssh-guard.bans` 是**只读视图**，`applied` 恒为 `false`（封禁执行的真相在 `ban.add`/`ban.remove` 的结果里，
+  且以 `fail2ban-status` 回读为准）。
+
+## 封禁执行（ban.add / ban.remove，0.2.2）
+
+插件进程以非 root 运行（ADR-0018：插件永不提权），封禁/解封**只经内核提权通道**执行 `info.json`
+声明的固定 argv——插件进程既不 exec sudo、也不直呼 `fail2ban-client`：
+
+```
+ssh-guard.ban.add {"ip":"203.0.113.7","confirm":"<一次性令牌>"}
+  → 内核 systemd-run -- /usr/bin/fail2ban-client set sshd banip 203.0.113.7
+  → fail2ban-status 回读 → {"applied":true,"verified":true,"banned":[...],"banned_count":N,...}
+
+ssh-guard.ban.remove {"ip":"203.0.113.7"}
+  → /usr/bin/fail2ban-client set sshd unbanip 203.0.113.7 → 回读 → {"applied":true,"verified":true}
+```
+
+- **argv 形状由协议锁死**：`banip` / `unbanip` 的追加参数只能是 `shapeIPOrCIDR`
+  （`pkg/pluginapi/rootpolicy.go`）；插件侧再用 `net.ParseIP` 收窄成**纯 IP 字面量**
+  （拒绝 CIDR、通配 `*`、`all`、分号、空格、换行、`$()`、反引号），通过后归一化（`ip.String()`）
+  作为**唯一**追加参数下发。两道防线：插件先拒绝，内核 SDK 再复核。
+- **不可逆动作要令牌**：`ban.add` 缺少 `confirm` 时直接 `E_UNAUTHORIZED` + hint
+  （给出 `GET /api/v1/plugins/ssh-guard/root-action/fail2ban-banip/confirm-token` 的取用路径），
+  **不发起任何命令**；令牌由管理员会话签发（插件 bearer 无权自签），插件只转发给内核核销。
+- **结果口径**：`applied` = 命令已执行且退出码 0；`verified` = 执行后经 `fail2ban-status` 回读，
+  封禁清单与预期一致。回读不可用或与预期不符时 `verified=false` + `note` 说明原因，**不假装生效**。
+- **降权边界**：非 root / 无 systemd / 通道三要素（`KORE_KERNEL_SOCK`、`KORE_PLUGIN_TOKEN`、
+  `KORE_PLUGIN_ID`）缺一时如实返回 `E_NEED_ROOT` / `E_NO_SYSTEMD` + 可操作 hint，不静默失败。
+
+## 方法级 capability（method_capabilities，0.2.2）
+
+`info.json` 逐方法声明宿主特权能力（协议 PLUGIN-PROTOCOL §3.1.2.1，写法照 `site` / `db-mysql`）：
+内核按方法取用，命中即单独生效，未声明的方法回退插件级 `capabilities`（`system:admin`）。
+
+| 类别 | 方法 | 能力 |
+| --- | --- | --- |
+| 只读（5） | `status` / `attempts` / `bans` / `ban.list` / `config.get` | `system:read` |
+| 写（3） | `ban.add` / `ban.remove` / `config.set` | `system:admin` |
+
+收益：只读调用（含配置读取）按 `system:read` 判定，不再按插件级 `system:admin` 写 `invoke.*` 审计
+（§3.5 #12）；写方法仍按 admin 审计。`method_capabilities` 与 `methods.go` 的 `businessVerb` 白名单
+由单测（`banwrite_test.go:TestMethodCapabilitiesMatchMethods`）双向锁定，新增/删除方法时两处必须同改。
 
 ## root 动作声明（ADR-0018）
 
 `info.json` 声明 `requires_root: true` 与 3 个 `root_actions`（固定 argv、不经 shell），
-**三条都在代码里有真实调用点**（`fail2ban-status` 用于 status/bans 的状态读取，
-`fail2ban-banip`/`fail2ban-unbanip` 用于 ban.add/ban.remove 的动作指向；由
+**三条都在代码里有真实执行点**（`fail2ban-status` 用于 status/bans 的状态读取 + 写操作后的回读校验，
+`fail2ban-banip`/`fail2ban-unbanip` 由 ban.add/ban.remove 真实执行；由
 `TestFail2banPathsMatchInfoJSON` 双向锁定）：
 
 | action id | argv | irreversible | 代码调用点 |
 | --- | --- | --- | --- |
-| `fail2ban-status` | `/usr/bin/fail2ban-client status sshd` | 否 | `protection.go:probeFail2ban` 经内核通道读取 |
-| `fail2ban-banip` | `/usr/bin/fail2ban-client set sshd banip`（追加 IP） | 是 | `methods.go:handleBanWrite`（ban.add） |
-| `fail2ban-unbanip` | `/usr/bin/fail2ban-client set sshd unbanip`（追加 IP） | **否** | `methods.go:handleBanWrite`（ban.remove） |
+| `fail2ban-status` | `/usr/bin/fail2ban-client status sshd` | 否 | `protection.go:probeFail2ban` 经内核通道读取；`methods.go:verifyBan` 写后回读 |
+| `fail2ban-banip` | `/usr/bin/fail2ban-client set sshd banip`（追加 IP） | 是 | `methods.go:handleBanWrite`（ban.add）经 `rootActionFunc` 真实执行 |
+| `fail2ban-unbanip` | `/usr/bin/fail2ban-client set sshd unbanip`（追加 IP） | **否** | `methods.go:handleBanWrite`（ban.remove）经 `rootActionFunc` 真实执行 |
 
 ### irreversible 语义（内核核实，0.2.1 调整）
 
@@ -149,6 +191,12 @@ make check   # gofmt → go vet → go test -timeout 200s
 - 根目录单测：`net.Pipe` 模拟主壳侧，覆盖握手、全部业务方法、日志解析（真实格式的
   `Failed password` / `Invalid user` / `Accepted` 行）、IP 聚合与 top 排序、小时时间线、
   无日志降级、可疑 IP 阈值（集中爆破命中 / 分散不命中）、用户名脱敏、配置契约。
+- 0.2.2 新增（`banwrite_test.go`）：方法级 capability 表驱动（8 条、键域 `ssh-guard.`、只读/写分类、
+  与 `businessVerb` 双向对齐）、封禁执行链路（`banip` → 只追加 IP → `fail2ban-status` 回读 → `verified`）、
+  `ban.add` 缺 confirm → `E_UNAUTHORIZED` 且零命令、`ban.remove` 无令牌可执行、11 类 IP 注入串全部
+  `E_INVALID` 且不触发通道、SDK `ValidateRootAppendedArgv` 形状复核（合法 IP 通过 / 注入串被拒）、
+  内核错误码保留（E_NEED_ROOT / E_NO_SYSTEMD / E_UNAUTHORIZED / E_INTERNAL）、退出码非 0 → 显式失败、
+  回读不可用与回读不符两条降级路径、`status.config_source`（request / host / none）+ 降级 note。
 - 0.2.1 新增：root-action 通道四态（成功 / 通道未注入 / 通道报 E_NEED_ROOT / 非零退出码）、
   通道客户端真实 UDS+HTTP 契约（bearer、action_id、退出码、错误体）、声明↔代码一致性
   （`info.json` 每条 root action 的 id 与 argv[0] 必须与代码常量逐字一致）、`irreversible`
@@ -161,7 +209,11 @@ make check   # gofmt → go vet → go test -timeout 200s
 
 ## 未完成项（v1.1+）
 
-- 提权成功路径：root_actions 真实执行依赖内核提权通道 v1.0（systemd-run transient unit），本轮仅声明与拒绝路径验证。
-- `sshd_config` 读取与原子写入、`sshd -t` 校验、变更回滚。
+- `sshd_config` 读取与原子写入、`sshd -t` 校验、变更回滚：**被内核命令白名单阻塞**——协议
+  `RootCommandPolicies`（`pkg/pluginapi/rootpolicy.go`）没有 `sshd` / `cat` / 写文件的形状，
+  插件侧无法声明这样的 root action；需要先在 kore 侧扩协议（新 policy + ADR），插件才能跟进。
+  当前 `status` 只审计注入文本（`params.sshd_config` 或 `KORE_SSHD_CONFIG`），`config_source=none` 时显式降级。
+- 封禁执行已在 0.2.2 落地（`banip` / `unbanip` 经提权通道真实执行 + 回读校验）；
+  仅"提权成功路径的真机 e2e"仍依赖 root + systemd 环境（本仓单测用替身通道覆盖 argv 与回读）。
 - 封禁持久化视图与 fail2ban 联动策略配置（当前 config.set 不落盘）。
 - 生产级四类故障注入（磁盘满、cgroup 超限）与预设"开箱可用"标记。

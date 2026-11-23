@@ -30,7 +30,9 @@ type rootActionOutput struct {
 }
 
 // rootActionFunc 是插件→内核提权通道的调用面；nil 表示通道未注入（按降级处理）。
-type rootActionFunc func(actionID string, args []string) (rootActionOutput, error)
+//
+// confirm 是不可回滚动作的一次性令牌（内核 privilege.Execute 核销）；只读与可逆动作为空串。
+type rootActionFunc func(actionID string, args []string, confirm string) (rootActionOutput, error)
 
 // rootActionClient 是插件→内核提权通道的客户端（ADR-0018）。
 //
@@ -77,6 +79,8 @@ func rootActionFuncFromEnv() rootActionFunc {
 type rootActionRequest struct {
 	ActionID string   `json:"action_id"`
 	Args     []string `json:"args,omitempty"`
+	// Confirm 是不可回滚动作的一次性令牌（内核侧 schema：confirm,omitempty）。
+	Confirm string `json:"confirm,omitempty"`
 }
 
 type rootActionResponse struct {
@@ -95,8 +99,11 @@ type rootActionError struct {
 
 // Call 经内核执行一个声明过的 root 动作，返回输出与退出码。
 // 错误信息保留内核错误码与 hint，便于上层拼可操作提示（不吞错、不改写成成功）。
-func (c *rootActionClient) Call(actionID string, args []string) (rootActionOutput, error) {
-	body, err := json.Marshal(rootActionRequest{ActionID: actionID, Args: args})
+//
+// confirm 只用于不可回滚动作（info.json 的 irreversible:true）；其余动作传空串。
+// 令牌由管理员会话经内核 confirm-token 端点签发，插件不自行签发/伪造。
+func (c *rootActionClient) Call(actionID string, args []string, confirm string) (rootActionOutput, error) {
+	body, err := json.Marshal(rootActionRequest{ActionID: actionID, Args: args, Confirm: confirm})
 	if err != nil {
 		return rootActionOutput{}, fmt.Errorf("序列化 root-action 请求失败：%w", err)
 	}

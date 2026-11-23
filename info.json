@@ -1,7 +1,7 @@
 {
   "id": "ssh-guard",
   "name": "SSH 加固插件",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "protocol": "kore.plugin.v1",
   "lifecycle": "lazy",
   "depth_level": "basic",
@@ -9,6 +9,16 @@
   "capabilities": [
     "system:admin"
   ],
+  "method_capabilities": {
+    "ssh-guard.status": "system:read",
+    "ssh-guard.attempts": "system:read",
+    "ssh-guard.bans": "system:read",
+    "ssh-guard.ban.list": "system:read",
+    "ssh-guard.ban.add": "system:admin",
+    "ssh-guard.ban.remove": "system:admin",
+    "ssh-guard.config.get": "system:read",
+    "ssh-guard.config.set": "system:admin"
+  },
   "triggers": [],
   "requires_kore": ">=0.1.0 <0.2.0",
   "resources": {
@@ -21,7 +31,7 @@
   "scenario_tags": [
     "sec"
   ],
-  "size_bytes": 2803976,
+  "size_bytes": 2831652,
   "requires_root": true,
   "root_actions": [
     {
@@ -32,7 +42,7 @@
         "sshd"
       ],
       "timeout_s": 10,
-      "description": "经内核提权通道读取 fail2ban sshd jail 的封禁状态（只读；插件进程不再直呼 fail2ban-client）"
+      "description": "经内核提权通道读取 fail2ban sshd jail 的封禁状态（只读；插件进程不再直呼 fail2ban-client）。0.2.2 起兼作封禁执行后的回读校验"
     },
     {
       "id": "fail2ban-banip",
@@ -43,7 +53,7 @@
         "banip"
       ],
       "timeout_s": 10,
-      "description": "封禁 IP：追加参数为 IP 地址（如 203.0.113.7）。不可逆动作，执行前需一次性 confirm 令牌；可能影响合法访问者",
+      "description": "封禁 IP：追加参数为单个合法 IP（如 203.0.113.7）。0.2.2 起由 ssh-guard.ban.add 经本通道真实执行（插件非 root，绝不进程内提权）。不可逆动作，执行前需一次性 confirm 令牌；可能影响合法访问者",
       "irreversible": true
     },
     {
@@ -55,7 +65,7 @@
         "unbanip"
       ],
       "timeout_s": 10,
-      "description": "解封 IP：追加参数为 IP 地址（如 203.0.113.7）。恢复性动作（可再次封禁回滚），无需一次性 confirm 令牌"
+      "description": "解封 IP：追加参数为单个合法 IP（如 203.0.113.7）。0.2.2 起由 ssh-guard.ban.remove 经本通道真实执行。恢复性动作（可再次封禁回滚），无需一次性 confirm 令牌"
     }
   ]
 }

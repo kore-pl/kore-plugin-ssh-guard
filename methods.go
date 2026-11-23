@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,7 +59,7 @@ func dispatch(request *pluginapi.Request, cfg *config, logger *slog.Logger) (*pl
 	case "ban.list":
 		perr = handleBanList(request.Params, response)
 	case "ban.add", "ban.remove":
-		perr = handleBanWrite(request.Params, verb, response)
+		perr = handleBanWrite(request.Params, verb, guardRootAction, response)
 	default:
 		perr = notFound(verb)
 	}
@@ -83,7 +84,7 @@ func businessVerb(method, id string) (string, bool) {
 // handleStatus 返回只读审计结果 + 防护源检测：配置文本来自请求或宿主注入，不读不写真实 sshd_config；
 // 防护源检测只读日志与探测 fail2ban 客户端，不执行任何封禁动作。
 func handleStatus(raw json.RawMessage, cfg *config, response *pluginapi.Response) *pluginapi.Error {
-	text, perr := parseConfigText(raw, *cfg)
+	text, source, perr := parseConfigText(raw, *cfg)
 	if perr != nil {
 		return perr
 	}
@@ -94,40 +95,61 @@ func handleStatus(raw json.RawMessage, cfg *config, response *pluginapi.Response
 			issues++
 		}
 	}
-	response.Result = encode(statusAuditResult{
-		Status:     "ready",
-		UptimeS:    int64(time.Since(cfg.startedAt).Seconds()),
-		Goroutines: runtime.NumGoroutine(),
-		Checks:     checks,
-		Total:      len(checks),
-		Issues:     issues,
-		Applied:    false,
-		Protection: protectionPtr(detectProtection(cfg.guard, guardRootAction)),
-	})
+	result := statusAuditResult{
+		Status:       "ready",
+		UptimeS:      int64(time.Since(cfg.startedAt).Seconds()),
+		Goroutines:   runtime.NumGoroutine(),
+		Checks:       checks,
+		Total:        len(checks),
+		Issues:       issues,
+		Applied:      false,
+		Protection:   protectionPtr(detectProtection(cfg.guard, guardRootAction)),
+		ConfigSource: source,
+	}
+	if source == configSourceNone {
+		result.Note = "未拿到 sshd_config 文本（config_source=none）：插件以非 root 运行，读不了 /etc/ssh/sshd_config" +
+			"（通常 0600 root:root），提权通道的命令白名单也没有 cat/sshd 形状；" +
+			"上面 \"(未设置)\" 只代表本次没有文本，不代表宿主配置不合规。" +
+			"请用 params.sshd_config 注入文本，或由启动方经 KORE_SSHD_CONFIG 注入后再审计"
+	}
+	response.Result = encode(result)
 	return nil
 }
 
-// parseConfigText 校验 ssh.status 入参并取出审计文本：优先请求内联，其次宿主注入。
-func parseConfigText(raw json.RawMessage, cfg config) (string, *pluginapi.Error) {
+// 审计文本来源口径（config_source）：请求内联 > 宿主注入 > 无。
+const (
+	configSourceRequest = "request"
+	configSourceHost    = "host"
+	configSourceNone    = "none"
+)
+
+// parseConfigText 校验 ssh.status 入参并取出审计文本与来源：优先请求内联，其次宿主注入。
+// 本函数**从不打开** /etc/ssh/sshd_config（降权后进程读不到，见 statusAuditResult.ConfigSource）。
+func parseConfigText(raw json.RawMessage, cfg config) (string, string, *pluginapi.Error) {
 	p := struct {
 		SSHDConfig *string `json:"sshd_config"`
 	}{}
 	if len(raw) != 0 && string(raw) != "null" {
 		if raw[0] != '{' {
-			return "", invalidParam("params 必须是 JSON 对象")
+			return "", "", invalidParam("params 必须是 JSON 对象")
 		}
 		if err := json.Unmarshal(raw, &p); err != nil {
-			return "", invalidParam("params 解析失败: " + err.Error())
+			return "", "", invalidParam("params 解析失败: " + err.Error())
 		}
 	}
 	text := cfg.sshdConfig
+	source := configSourceHost
 	if p.SSHDConfig != nil {
 		text = *p.SSHDConfig
+		source = configSourceRequest
 	}
 	if len(text) > maxConfigBytes {
-		return "", invalidParam("sshd_config 超过 64 KiB 上限")
+		return "", "", invalidParam("sshd_config 超过 64 KiB 上限")
 	}
-	return text, nil
+	if text == "" {
+		source = configSourceNone
+	}
+	return text, source, nil
 }
 
 // handleBanList 返回结构化封禁清单；basic 骨架不含真实封禁执行器，恒为空且 applied=false。
@@ -434,11 +456,14 @@ const needRootCode = "E_NEED_ROOT"
 // protectionPtr 返回防护结果指针（空引擎也如实返回）。
 func protectionPtr(info protectionInfo) *protectionInfo { return &info }
 
-// handleBanWrite 处理 ssh.ban.add / ssh.ban.remove：写操作需要宿主 root 权限，
-// 插件以非 root 运行（ADR-0018：插件永不提权），按降级口径返回 E_NEED_ROOT + hint。
-// 真实执行走 info.json 声明的 root_actions 经内核代理（systemd transient unit），
-// 本轮只声明、不验证成功路径（诚实：不假装执行成功）。
-func handleBanWrite(raw json.RawMessage, verb string, response *pluginapi.Response) *pluginapi.Error {
+// handleBanWrite 处理 ssh.ban.add / ssh.ban.remove：**真实经内核提权通道执行**
+// `fail2ban-client set sshd banip|unbanip <ip>`（argv 由 info.json 的 root_actions 固定，
+// IP 只能作为追加参数；内核还会按协议 shapeIPOrCIDR 复核）。
+//
+// 降权口径（ADR-0018）：插件以非 root 运行且永不提权，命令一律由内核经 systemd-run 代理。
+// 通道三要素（KORE_KERNEL_SOCK / KORE_PLUGIN_TOKEN / KORE_PLUGIN_ID）缺一时返回 E_NEED_ROOT +
+// 可操作 hint，不假装成功；执行后必须回读封禁清单证明生效（Verified），回读不可用则显式说明。
+func handleBanWrite(raw json.RawMessage, verb string, call rootActionFunc, response *pluginapi.Response) *pluginapi.Error {
 	p := banWriteParams{}
 	if len(raw) != 0 && string(raw) != "null" {
 		if raw[0] != '{' {
@@ -448,22 +473,156 @@ func handleBanWrite(raw json.RawMessage, verb string, response *pluginapi.Respon
 			return invalidParam("params 解析失败: " + err.Error())
 		}
 	}
-	if net.ParseIP(p.IP) == nil {
+	// IP 校验是注入防线：net.ParseIP 只接受纯 IP 字面量（分号 / 空格 / $() / 换行 / CIDR 一律拒绝），
+	// 通过后再归一化成规范写法，作为**唯一**追加参数交给内核。
+	parsed := net.ParseIP(strings.TrimSpace(p.IP))
+	if parsed == nil {
 		return invalidParam("ip 不是合法 IP 地址")
 	}
+	address := parsed.String()
 	action := rootActionFail2banBanIP
 	if verb == "ban.remove" {
 		action = rootActionFail2banUnbanIP
 	}
+	if call == nil {
+		detail, _ := json.Marshal(rootHintDetail{
+			Hint: "封禁/解封需宿主 root 权限（" + action + " 经内核提权通道以固定 argv 执行 fail2ban-client）。" +
+				"两条路径：① 用 sudo 启动 kored，让内核经 systemd 提权代理执行；② 按 docs/RUNBOOK.md 为插件配置 systemd 提权。" +
+				"当前进程未拿到提权通道三要素（KORE_KERNEL_SOCK / KORE_PLUGIN_TOKEN / KORE_PLUGIN_ID 缺一），插件不会进程内提权",
+			RootAction: action,
+		})
+		return &pluginapi.Error{
+			Code:    needRootCode,
+			Message: verb + " 需要宿主 root 权限：内核未注入 root-action 通道，未执行任何命令",
+			Detail:  detail,
+		}
+	}
+	// 不可回滚动作（fail2ban-banip）必须携带一次性 confirm 令牌：由管理员会话向内核
+	// confirm-token 端点申请，插件只转发、不自行签发（与内核 ConfirmStore 同错误码）。
+	confirm := ""
+	if action == rootActionFail2banBanIP {
+		confirm = strings.TrimSpace(p.Confirm)
+		if confirm == "" {
+			return confirmRequiredError(action)
+		}
+	}
+	out, err := call(action, []string{address}, confirm)
+	if err != nil {
+		return rootChannelError(action, err)
+	}
+	if out.ExitCode != 0 {
+		return banExecFailed(action, address, out)
+	}
+	banned, count, verified, note := verifyBan(call, address, verb)
+	response.Result = encode(banWriteResult{
+		IP:          address,
+		Action:      action,
+		Applied:     true,
+		ExitCode:    out.ExitCode,
+		Stdout:      firstLine(out.Stdout),
+		Stderr:      firstLine(out.Stderr),
+		Banned:      banned,
+		BannedCount: count,
+		Verified:    verified,
+		Note:        note,
+	})
+	return nil
+}
+
+// confirmRequiredError 是「不可回滚动作缺一次性令牌」的显式拒绝（与内核 ConfirmStore 同错误码）。
+func confirmRequiredError(action string) *pluginapi.Error {
 	detail, _ := json.Marshal(rootHintDetail{
-		Hint:       "解封/加封需宿主 root 权限（" + action + " 经内核提权通道以固定 argv 执行 fail2ban-client）。两条路径：① 用 sudo 启动 kored，让内核经 systemd 提权代理执行；② 按 docs/RUNBOOK.md 为插件配置 systemd 提权。fail2ban-banip 为不可逆动作（需一次性 confirm 令牌），fail2ban-unbanip 为恢复性动作（可再次封禁回滚，无需令牌）。声明的 root_actions 见 info.json（需启用时逐条确认）",
+		Hint: "先在管理员会话调用 GET /api/v1/plugins/ssh-guard/root-action/" + action +
+			"/confirm-token 取一次性令牌（5 分钟有效、一次即废），再把它放进本方法的 params.confirm；" +
+			"插件只转发、不自行签发。ban.remove（unbanip）是恢复性动作，无需令牌",
 		RootAction: action,
 	})
 	return &pluginapi.Error{
-		Code:    needRootCode,
-		Message: verb + " 需要宿主 root 权限：插件以非 root 运行，已按 ADR-0018 声明 root_actions 交内核代理，本轮不执行",
+		Code:    pluginapi.E_UNAUTHORIZED,
+		Message: "ban.add 是不可回滚动作（" + action + "），缺少 confirm 一次性令牌，未执行",
 		Detail:  detail,
 	}
+}
+
+// rootChannelError 把提权通道错误映射为协议错误码：保留内核错误码（E_NEED_ROOT /
+// E_NO_SYSTEMD / E_UNAUTHORIZED），其余归 E_INTERNAL；错误文本原样保留供排障（不吞错）。
+func rootChannelError(action string, err error) *pluginapi.Error {
+	message := err.Error()
+	for _, code := range []string{needRootCode, pluginapi.E_NO_SYSTEMD, pluginapi.E_UNAUTHORIZED} {
+		if strings.Contains(message, code) {
+			return &pluginapi.Error{
+				Code:    code,
+				Message: "经内核提权通道执行 " + action + " 被拒绝：" + message,
+			}
+		}
+	}
+	return &pluginapi.Error{
+		Code:    pluginapi.E_INTERNAL,
+		Message: "经内核提权通道执行 " + action + " 失败：" + message,
+	}
+}
+
+// banExecFailed 是「命令执行了但退出码非 0」的显式失败（绝不返回 applied=true）。
+func banExecFailed(action, address string, out rootActionOutput) *pluginapi.Error {
+	reason := firstLine(out.Stderr)
+	if reason == "" {
+		reason = firstLine(out.Stdout)
+	}
+	message := "经内核提权通道执行 " + action + "（" + address + "）失败：退出码 " + strconv.Itoa(out.ExitCode)
+	if reason != "" {
+		message += "：" + reason
+	}
+	detail, _ := json.Marshal(banExecErrorDetail{
+		ExitCode: out.ExitCode,
+		Stdout:   firstLine(out.Stdout),
+		Stderr:   firstLine(out.Stderr),
+	})
+	return &pluginapi.Error{Code: pluginapi.E_INTERNAL, Message: message, Detail: detail}
+}
+
+// verifyBan 在执行后用 fail2ban-status 动作回读封禁清单，判断状态是否按预期变化。
+// 返回 (清单, 封禁数, 是否与预期一致, 说明)；回读不可用时 verified=false 并给出原因。
+func verifyBan(call rootActionFunc, address, verb string) (banned []string, count int, verified bool, note string) {
+	st := probeFail2ban(call)
+	banned = st.BannedIPs
+	if banned == nil {
+		banned = []string{}
+	}
+	count = st.CurrentlyBanned
+	if !st.Active {
+		reason := st.ProbeErr
+		if reason == "" {
+			reason = "fail2ban 状态不可读（未安装，或提权通道不可用）"
+		}
+		return banned, 0, false, "命令已执行，但回读失败、无法确认是否生效：" + reason +
+			"；请用 fail2ban-client status sshd 在宿主人工核对"
+	}
+	found := containsIP(banned, address)
+	wantBanned := verb == "ban.add"
+	if found != wantBanned {
+		state := "已不在封禁列表"
+		if found {
+			state = "仍在封禁列表"
+		}
+		return banned, count, false, "回读与预期不符：执行后该 IP " + state +
+			"（fail2ban sshd jail 当前 " + strconv.Itoa(count) + " 条）"
+	}
+	return banned, count, true, ""
+}
+
+// containsIP 报告清单里是否有与 address 等价的 IP：按解析后语义比较，
+// 兼容 IPv4-mapped IPv6 与不同写法（如 203.0.113.7 与 ::ffff:203.0.113.7）。
+func containsIP(list []string, address string) bool {
+	target := net.ParseIP(address)
+	if target == nil {
+		return false
+	}
+	for _, item := range list {
+		if ip := net.ParseIP(item); ip != nil && ip.Equal(target) {
+			return true
+		}
+	}
+	return false
 }
 
 // invalidParam 构造 E_INVALID 错误体（§9）。

@@ -69,7 +69,7 @@ func TestRootActionClientCall(t *testing.T) {
 	if rootActionFuncFromEnv() == nil {
 		t.Fatal("三要素齐备时应返回非 nil 调用面")
 	}
-	out, err := client.Call(rootActionFail2banStatus, nil)
+	out, err := client.Call(rootActionFail2banStatus, nil, "")
 	if err != nil {
 		t.Fatalf("通道调用失败: %v", err)
 	}
@@ -81,6 +81,31 @@ func TestRootActionClientCall(t *testing.T) {
 	}
 }
 
+// TestRootActionClientForwardsConfirm 不可回滚动作必须把 confirm 令牌放进请求体（内核据此核销）。
+func TestRootActionClientForwardsConfirm(t *testing.T) {
+	var got rootActionRequest
+	socket := startKernelSocket(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("解析请求体: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(rootActionResponse{Executed: true, ExitCode: 0, Stdout: "ok"})
+	}))
+	setKernelEnv(t, socket)
+	out, err := newRootActionClient().Call(rootActionFail2banBanIP, []string{"203.0.113.7"}, "confirm-tok-1")
+	if err != nil {
+		t.Fatalf("通道调用失败: %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("退出码=%d，期望 0", out.ExitCode)
+	}
+	if got.ActionID != rootActionFail2banBanIP || len(got.Args) != 1 || got.Args[0] != "203.0.113.7" {
+		t.Fatalf("请求体=%+v，期望 action_id=%s args=[203.0.113.7]", got, rootActionFail2banBanIP)
+	}
+	if got.Confirm != "confirm-tok-1" {
+		t.Fatalf("confirm=%q，期望 confirm-tok-1（不可回滚动作必须透传令牌）", got.Confirm)
+	}
+}
+
 // TestRootActionClientNonZeroExit 退出码透传（命令跑了但失败，例如 socket 不可连）。
 func TestRootActionClientNonZeroExit(t *testing.T) {
 	socket := startKernelSocket(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +114,7 @@ func TestRootActionClientNonZeroExit(t *testing.T) {
 		})
 	}))
 	setKernelEnv(t, socket)
-	out, err := newRootActionClient().Call(rootActionFail2banStatus, nil)
+	out, err := newRootActionClient().Call(rootActionFail2banStatus, nil, "")
 	if err != nil {
 		t.Fatalf("非零退出码不是通道错误: %v", err)
 	}
@@ -108,7 +133,7 @@ func TestRootActionClientProtocolError(t *testing.T) {
 		})
 	}))
 	setKernelEnv(t, socket)
-	_, err := newRootActionClient().Call(rootActionFail2banStatus, nil)
+	_, err := newRootActionClient().Call(rootActionFail2banStatus, nil, "")
 	if err == nil {
 		t.Fatal("内核拒绝时应返回错误")
 	}

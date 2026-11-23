@@ -62,7 +62,7 @@ func probeFail2ban(call rootActionFunc) fail2banState {
 	if call == nil {
 		return st // 已安装但通道未注入：无法读取状态，hint 指向缺失的提权通道
 	}
-	out, err := call(rootActionFail2banStatus, nil)
+	out, err := call(rootActionFail2banStatus, nil, "")
 	if err != nil {
 		st.ProbeErr = err.Error()
 		return st
