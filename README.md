@@ -31,6 +31,7 @@ kore 的 **SSH 加固插件**（配置审计 + 攻击统计 + 封禁视图）。
 | `ssh-guard.ban.add {ip, confirm}` / `ban.add` | **真实封禁**：经 `fail2ban-banip` root 动作执行 `fail2ban-client set sshd banip <ip>`；不可逆动作，必须带一次性 `confirm` 令牌；执行后回读封禁清单（`verified`） |
 | `ssh-guard.ban.remove {ip}` / `ban.remove` | **真实解封**：经 `fail2ban-unbanip` root 动作执行 `fail2ban-client set sshd unbanip <ip>`；恢复性动作，无需令牌；执行后回读（`verified`） |
 | `ssh-guard.ban.list` / `ban.list` | 0.1.0 兼容保留：参数校验 + 空清单回显 |
+| `ssh-guard.suggest` / `suggest` | **只读建议态（dry_run=true，不写宿主）**：按 `{disable_password_auth?, disable_root_login?, port?, max_auth_tries?}` 渲染 `/etc/ssh/sshd_config.d/kore.conf` 建议文本，并返回 `path_hint`、`diff_from_current`（可读主配置时）、`risk[]`（含回滚说明）、`apply_commands[]`（cp -a 备份 → install/tee 写入 → `sshd -t` → `systemctl reload sshd`）、`verify_commands[]`（`sshd -T`） |
 | `kore.ping` / `kore.reload` / `kore.shutdown` | 协议必选方法；`kore.reload` 无外部配置，`config_digest` 为空 |
 
 ### 防护源检测（status.protection）
@@ -74,6 +75,21 @@ kore 的 **SSH 加固插件**（配置审计 + 攻击统计 + 封禁视图）。
 - `ssh-guard.bans` 是**只读视图**，`applied` 恒为 `false`（封禁执行的真相在 `ban.add`/`ban.remove` 的结果里，
   且以 `fail2ban-status` 回读为准）。
 
+## sshd 加固建议（suggest，0.3.0）
+
+**这是建议态，不是自动下发**：内核当前没有受控文件写原语，`sshd -t` / `systemctl reload sshd` 也不在
+ADR-0022 的形状表里，插件以非 root 运行无法写 `/etc/ssh`。真机下发待 v1.1（需 ADR-0022 增补受控写原语）。
+
+`ssh-guard.suggest` 只做三件事，且全部只读（`system:read`，`dry_run` 恒 `true`）：
+
+1. **渲染建议配置**：`config_text` 是分段注释的 drop-in 文本（`/etc/ssh/sshd_config.d/kore.conf`），
+   `path_hint` 说明主文件是否已 `Include /etc/ssh/sshd_config.d/*.conf`；读得到主配置时附
+   `diff_from_current`（当前值 vs 建议值），读不到则说明原因。
+2. **给风险提示**（每条含怎么回滚）：改 `port` → 先放行新端口并 `ssh -p` 验证；禁密码 → 确认已有可用密钥
+   且当前不是唯一密码会话；禁 root → 确认有可 sudo 的普通用户；`max_auth_tries` 过低 → 自动化客户端会被提前断开。
+3. **给可复制命令**：`apply_commands[]` 是 `cp -a` 时间戳备份 → 写 drop-in（0644 root:root）→ `sshd -t`
+   → `systemctl reload sshd` 的完整序列，`verify_commands[]` 用 `sshd -T | grep` 回读最终生效值。
+
 ## 封禁执行（ban.add / ban.remove，0.2.2）
 
 插件进程以非 root 运行（ADR-0018：插件永不提权），封禁/解封**只经内核提权通道**执行 `info.json`
@@ -107,7 +123,7 @@ ssh-guard.ban.remove {"ip":"203.0.113.7"}
 
 | 类别 | 方法 | 能力 |
 | --- | --- | --- |
-| 只读（5） | `status` / `attempts` / `bans` / `ban.list` / `config.get` | `system:read` |
+| 只读（6） | `status` / `attempts` / `bans` / `ban.list` / `suggest` / `config.get` | `system:read` |
 | 写（3） | `ban.add` / `ban.remove` / `config.set` | `system:admin` |
 
 收益：只读调用（含配置读取）按 `system:read` 判定，不再按插件级 `system:admin` 写 `invoke.*` 审计

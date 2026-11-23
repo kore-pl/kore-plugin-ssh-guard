@@ -58,6 +58,8 @@ func dispatch(request *pluginapi.Request, cfg *config, logger *slog.Logger) (*pl
 		perr = handleConfigSet(request.Params, cfg, response)
 	case "ban.list":
 		perr = handleBanList(request.Params, response)
+	case "suggest":
+		perr = handleSuggest(request.Params, response)
 	case "ban.add", "ban.remove":
 		perr = handleBanWrite(request.Params, verb, guardRootAction, response)
 	default:
@@ -74,7 +76,7 @@ func dispatch(request *pluginapi.Request, cfg *config, logger *slog.Logger) (*pl
 func businessVerb(method, id string) (string, bool) {
 	verb := strings.TrimPrefix(method, id+".")
 	switch verb {
-	case "status", "attempts", "bans", "config.get", "config.set", "ban.list", "ban.add", "ban.remove":
+	case "status", "attempts", "bans", "config.get", "config.set", "ban.list", "ban.add", "ban.remove", "suggest":
 		return verb, true
 	default:
 		return "", false

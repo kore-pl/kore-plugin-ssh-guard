@@ -31,6 +31,7 @@ var expectedMethodCapabilities = map[string]string{
 	"status":     "system:read",
 	"attempts":   "system:read",
 	"bans":       "system:read",
+	"suggest":    "system:read",
 	"ban.list":   "system:read",
 	"ban.add":    "system:admin",
 	"ban.remove": "system:admin",

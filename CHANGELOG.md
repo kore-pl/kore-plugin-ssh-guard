@@ -2,6 +2,27 @@
 
 本仓库遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
+## [0.3.0] - 2026-11-23
+
+### 新增（sshd 加固建议态，非自动下发）
+
+- **`ssh-guard.suggest`（只读 `system:read`，`dry_run` 恒 true）**：入参
+  `{disable_password_auth?, disable_root_login?, port?, max_auth_tries?}`，返回
+  `{config_text, path_hint, diff_from_current?, risk[], apply_commands[], verify_commands[], dry_run}`。
+  `config_text` 是分段注释的 `/etc/ssh/sshd_config.d/kore.conf` drop-in；`diff_from_current` 只在主配置
+  可读时给出当前值 vs 建议值；读不到则 `path_hint` 说明原因。
+- **风险提示带回滚**：改 port → 先放行新端口并 `ssh -p` 验证；禁密码 → 确认已有可用密钥且当前不是唯一
+  密码会话；禁 root → 确认有可 sudo 的普通用户；每条风险附具体回滚步骤。
+- **可复制命令**：`apply_commands[]` 串起 `cp -a` 时间戳备份 → `install -d` + `tee` 写 drop-in →
+  `sshd -t` 校验 → `systemctl reload sshd`（每步带注释、无占位符）；`verify_commands[]` 用 `sshd -T | grep`。
+
+### 边界（诚实声明）
+
+- **不写宿主**：内核没有受控文件写原语，`sshd -t` / `systemctl reload sshd` 不在 ADR-0022 形状表内，
+  插件以非 root 运行；`apply` / `rollback` 真机下发待 v1.1（需 ADR-0022 增补受控写原语）。
+  本版本只生成建议与命令，用户确认后手工执行。
+- 现有 `ban.add` / `ban.remove` 的真实执行（0.2.2 起）不受影响。
+
 ## [0.2.3] - 2026-11-23
 
 ### Changed
