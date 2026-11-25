@@ -1,5 +1,7 @@
 # kore-plugin-ssh-guard
 
+语言：[简体中文](docs/DETAIL.md) · [English](docs/DETAIL.en.md) · [Español](docs/DETAIL.es.md) · [Français](docs/DETAIL.fr.md) · [Deutsch](docs/DETAIL.de.md) · [Русский](docs/DETAIL.ru.md) · [Português](docs/DETAIL.pt.md)
+
 kore 的 **SSH 加固插件**（配置审计 + 攻击统计 + 封禁视图）。`info.json.depth_level = "basic"`、
 `lifecycle = "lazy"`。0.2.0 完成 L1 → L1.5：从"注入文本审计骨架"升级为"真实日志统计 + 防护源检测 + root 动作声明"；
 0.2.1 修三项技术债：fail2ban 状态读取统一走 root 通道（声明不再空置）、路径口径统一为唯一绝对路径、
@@ -261,5 +263,9 @@ make check   # gofmt → go vet → go test -timeout 200s
 - **验证方式**：本地 `make check` 优先（GitHub CI 只手动触发，Gitea CI 按版本 tag 触发；发布前 `make dist` 连跑两次核对 sha 一致）。
 - **发布产物**：`make dist` → `dist/ssh-guard-0.4.0.tar.gz` + `.sha256`（位级可复现，连跑两次 sha 相同）。
 - **相关仓库**：[索引 kore-plugins](https://github.com/kore-pl/kore-plugins) · [协议文档](https://github.com/kore-pl/kore/blob/main/docs/PLUGIN-PROTOCOL.md) · [SDK 指南](https://github.com/kore-pl/kore/blob/main/docs/PLUGIN-SDK.md)
+
+
+
+如果你觉得这个插件有用，欢迎给仓库点个 ⭐ Star —— 你的支持是持续维护的动力。
 
 <!-- oss:end -->

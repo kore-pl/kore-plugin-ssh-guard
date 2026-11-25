@@ -62,3 +62,11 @@
 - 发现漏洞**不要开公开 issue**，按 [SECURITY.md](SECURITY.md) 私下披露。
 - 参与即表示同意 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 - 能力声明与宿主写入面（文件、进程、网络、数据库等）按真实实现写；不得声明未实现的权限，也不得在文档里承诺未实现的能力。
+
+## 8. 分支模型（Git Flow）
+
+- **长期分支**：`main` 是发布主线，`develop` 是日常集成分支；两者都只接受合入，不直推、不 force push、不 rebase 已推送历史。本地 `develop` 从 `main` 创建，是否推送到远端由维护者决定；本项目的远端默认分支保持 `main`。
+- **短期分支**：`feature/<kebab-case>` 与 `fix/<kebab-case>` 从 `develop` 开出并合回 `develop`；`release/<vX.Y.Z>` 与 `hotfix/<vX.Y.Z>` 冻结后**双向合流**到 `main` 与 `develop`（`--no-ff`），避免漏回灌把已修缺陷带回 `main`。
+- **命名**：分支名、目录与文件名统一 kebab-case；tag 用语义化版本 `vMAJOR.MINOR.PATCH`。
+- **签名约定**：本机 Git 配置 `gpg.format=ssh`、`user.signingkey=/home/pt/.ssh/id_ed25519_github_docker_panel.pub`、`tag.gpgSign=true`、`gpg.ssh.allowedSignersFile=<repo>/.git/allowed_signers`；发布 tag 一律用 `git tag -s` 签名，`git tag -v` 应显示 `Good "git" signature`。提交继续用 `git commit -s` 签 DCO。
+- **历史不可变**：已发布的 tag 一律不重签、不删除、不 force push；工程标准化只追加新 tag，不动旧 tag。
