@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "SSH Hardening Plugin",
+    "description": "kore's SSH hardening plugin: read-only config audit, real log-based attack statistics, ban/unban through the kernel root-action channel and whitelist management — never rewrites host sshd_config.",
+    "detail": "docs/DETAIL.en.md"
+  }
+}

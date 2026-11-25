@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Plugin de endurecimento SSH",
+    "description": "Plugin de endurecimento SSH do kore: auditoria de configuração somente leitura, estatísticas reais de ataques a partir de logs, bloqueio/desbloqueio pelo canal root do kernel e gestão de whitelist — nunca reescreve o sshd_config do host.",
+    "detail": "docs/DETAIL.pt.md"
+  }
+}

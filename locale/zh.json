@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "SSH 加固插件",
+    "description": "kore 的 SSH 加固插件：只读配置审计、真实日志攻击统计、经内核提权通道执行封禁/解封与白名单管理，不改写宿主 sshd_config。",
+    "detail": "docs/DETAIL.md"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "SSH-Härtungsplugin",
+    "description": "kores SSH-Härtungsplugin: schreibgeschützte Konfigurationsprüfung, echte Angriffsstatistiken aus Logs, Sperren/Entsperren über den Kernel-Root-Kanal und Whitelist-Verwaltung — es verändert nie die sshd_config des Hosts.",
+    "detail": "docs/DETAIL.de.md"
+  }
+}

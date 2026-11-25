@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Plugin de durcissement SSH",
+    "description": "Plugin de durcissement SSH de kore : audit de configuration en lecture seule, statistiques d'attaques réelles à partir des journaux, blocage/déblocage via le canal privilégié du noyau et gestion de liste blanche — sans jamais réécrire sshd_config de l'hôte.",
+    "detail": "docs/DETAIL.fr.md"
+  }
+}

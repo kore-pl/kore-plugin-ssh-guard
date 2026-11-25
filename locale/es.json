@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Complemento de endurecimiento SSH",
+    "description": "Complemento de endurecimiento SSH de kore: auditoría de configuración de solo lectura, estadísticas reales de ataques en registros, bloqueo/desbloqueo mediante el canal root del núcleo y gestión de listas blancas; nunca modifica sshd_config del host.",
+    "detail": "docs/DETAIL.es.md"
+  }
+}
