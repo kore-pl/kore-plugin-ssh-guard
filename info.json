@@ -2,7 +2,7 @@
   "id": "ssh-guard",
   "name": "SSH 加固插件",
   "description": "SSH 登录防护：审计 sshd 配置、按来源/规则管理封禁与解封、白名单防误封、统计登录失败来源，并生成加固建议（建议态，不自动下发）",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "protocol": "kore.plugin.v1",
   "lifecycle": "lazy",
   "depth_level": "basic",
@@ -36,7 +36,7 @@
   "scenario_tags": [
     "sec"
   ],
-  "size_bytes": 2866030,
+  "size_bytes": 2866037,
   "requires_root": true,
   "root_actions": [
     {
