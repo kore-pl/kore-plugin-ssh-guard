@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # npm: this Go plugin currently has no npm manifest; keep dependency updates
+  # automatic should a web asset/manifest be added later.
+  - package-ecosystem: npm
+    directory: '/'
+    schedule:
+      interval: weekly
+
+  # Keep CI/build actions current.
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: weekly
