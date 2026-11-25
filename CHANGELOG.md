@@ -2,6 +2,39 @@
 
 本仓库遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
+## [0.4.0] - 2026-11-25
+
+### 新增（封禁可视化 / 白名单自保 / 失败类型）
+
+- **`ssh-guard.ban.list` 真实现（只读 `system:read`）**：此前是恒返回空数组的桩。现在每条封禁记录给出
+  `address / source（fail2ban 封禁 | 日志推断）/ rule（触发规则）/ banned_at + banned_at_source
+  （observed=本插件亲测 | log=日志推断，页面显式标注「推断」）/ remaining_s（读不到为 null，
+  绝不编造）/ whitelisted`；支持 `{limit, offset, address, source}`（地址精确过滤 + 稳定分页），
+  与 `ssh.bans` 共用同一份组装逻辑（同一事实、两套形状）。
+- **白名单自保（`whitelist` 只读 / `whitelist.add` `whitelist.remove` 写 `system:admin`）**：
+  白名单落盘到插件数据目录（`KORE_PLUGIN_DATA`，0600 原子写），返回「你最近一次 SSH 登录的 IP」候选
+  （来自成功登录日志，含最后登录时间与次数）、`current_whitelisted` 与 `banned_whitelisted`（自锁告警）。
+  **`ban.add` 对白名单 IP 直接拒绝（`E_CONFLICT` + 可操作 hint），命令根本不下发到提权通道**——
+  这是"防误封自己"的硬保证，不依赖前端判断，也不依赖提权通道是否可用。
+- **`ssh-guard.attempts.kinds`**：按失败类型聚合（`failed_password` / `invalid_user` /
+  `too_many_attempts`）+ 次数 + 占 `failed` 的整数百分比；类型只来自日志里真实存在的文本族，不自造分类。
+- **`config.bantime_s`**：fail2ban 的 bantime 插件读不到（`fail2ban-client get <jail> bantime` 不在
+  ADR-0022 形状表内），由运维填写秒数后，封禁清单才推算 `remaining_s`；未填（0）则留空。
+
+### 变更
+
+- `ssh.bans` 的条目形状扩容（新增 `source/rule/banned_at/remaining_s/whitelisted` 字段，旧字段与语义不变）；
+  `ssh.ban.list` 去掉骨架期的 `banEntry{until}`，改用与 bans 一致的 `banItem`。
+- 日志解析新增「重复认证超限」文本族（`maximum authentication attempts exceeded`）与
+  「Failed password for invalid user」归类到用户名探测（与 fail2ban 判据一致）；`failed` 计数口径不变。
+
+### 边界（诚实声明）
+
+- **剩余时长依赖人工填 bantime**：插件无法读取宿主 fail2ban 的 bantime，未填时 `remaining_s` 为 null，
+  不做没有依据的推测。
+- **白名单不写 fail2ban `ignoreip`**：零侵入口径下不写宿主机配置文件；白名单只约束**本插件发起**的封禁。
+- 本机无 fail2ban，真封禁/解封路径由 `banwrite_test.go` 的 fake 提权通道覆盖，真机复跑需 root + fail2ban。
+
 ## [0.3.1] - 2026-11-23
 
 ### 修复（声明与事实对齐，G-20）

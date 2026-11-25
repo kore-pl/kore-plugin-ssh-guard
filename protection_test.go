@@ -13,11 +13,11 @@ import (
 // fakeRootAction 是 rootActionFunc 的内存实现：记录被调用的 action id / 追加参数 / confirm
 // 令牌，返回预置输出。写操作用例还可用 results 按调用顺序返回不同输出（执行 → 回读两步）。
 type fakeRootAction struct {
-	calls   []string
-	args    [][]string
+	calls    []string
+	args     [][]string
 	confirms []string
-	output  rootActionOutput
-	err     error
+	output   rootActionOutput
+	err      error
 	// results 非空时按调用序号返回（越界后回落到 output/err）。
 	results []fakeRootResult
 }

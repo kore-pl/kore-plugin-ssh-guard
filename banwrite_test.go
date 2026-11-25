@@ -21,22 +21,25 @@ type capabilityManifest struct {
 	RootActions        []declaredRootAction `json:"root_actions"`
 }
 
-// expectedMethodCapabilities 是本仓 8 条方法级能力的唯一期望表：
-// 6 个业务方法（methods.go 的 businessVerb 白名单）+ 2 个配置面板契约方法。
+// expectedMethodCapabilities 是本仓 12 条方法级能力的唯一期望表：
+// 9 个业务方法（methods.go 的 businessVerb 白名单）+ 2 个配置面板契约方法 + 1 个白名单写方法。
 //
-// 只读 4 条 → system:read（status / attempts / bans / ban.list；config.get 同为只读）；
-// 写 2 条 → system:admin（ban.add / ban.remove；config.set 同为写）。
+// 只读 6 条 → system:read（status / attempts / bans / ban.list / whitelist / suggest；config.get 同为只读）；
+// 写 5 条 → system:admin（ban.add / ban.remove / whitelist.add / whitelist.remove；config.set 同为写）。
 // 分类错误的后果是把写权限降给只读会话，因此这张表也是"只读/写"分类的验收依据。
 var expectedMethodCapabilities = map[string]string{
-	"status":     "system:read",
-	"attempts":   "system:read",
-	"bans":       "system:read",
-	"suggest":    "system:read",
-	"ban.list":   "system:read",
-	"ban.add":    "system:admin",
-	"ban.remove": "system:admin",
-	"config.get": "system:read",
-	"config.set": "system:admin",
+	"status":           "system:read",
+	"attempts":         "system:read",
+	"bans":             "system:read",
+	"suggest":          "system:read",
+	"ban.list":         "system:read",
+	"whitelist":        "system:read",
+	"ban.add":          "system:admin",
+	"ban.remove":       "system:admin",
+	"whitelist.add":    "system:admin",
+	"whitelist.remove": "system:admin",
+	"config.get":       "system:read",
+	"config.set":       "system:admin",
 }
 
 // privilegedCapabilitySet 是内核唯一白名单（internal/core/registry/validate.go）。
@@ -61,7 +64,7 @@ func loadCapabilityManifest(t *testing.T) capabilityManifest {
 }
 
 // TestMethodCapabilitiesMatchMethods 表驱动校验方法级能力声明与实现面一致：
-//   - 条数 = 8（6 业务 + 2 config），键域必须是 ssh-guard.<action>；
+//   - 条数 = 12（9 业务 + 2 config + 1 whitelist 写），键域必须是 ssh-guard.<action>；
 //   - 每个键都能被 businessVerb 接受（声明 ⊆ 实现），且 businessVerb 白名单里的每个方法
 //     都有声明（实现 ⊆ 声明）；
 //   - 值只能是 6 项特权能力，且只读/写分类与 expectedMethodCapabilities 一致。
@@ -71,7 +74,7 @@ func TestMethodCapabilitiesMatchMethods(t *testing.T) {
 		t.Fatalf("info.json id=%q，期望 ssh-guard", m.ID)
 	}
 	if len(m.MethodCapabilities) != len(expectedMethodCapabilities) {
-		t.Fatalf("method_capabilities 声明 %d 条，期望 %d 条（6 业务方法 + config.get/set）",
+		t.Fatalf("method_capabilities 声明 %d 条，期望 %d 条（9 业务方法 + config.get/set + whitelist 写）",
 			len(m.MethodCapabilities), len(expectedMethodCapabilities))
 	}
 	prefix := m.ID + "."

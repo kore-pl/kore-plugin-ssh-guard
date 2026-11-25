@@ -32,6 +32,11 @@ const (
 	defaultLogSource    = "auto"
 	defaultThreshold    = 10
 	defaultRawTailLimit = 200
+	// defaultBantimeS 是 fail2ban 封禁时长的缺省值：0 = 未知（插件读不到宿主 bantime）。
+	// 填了才能把「剩余时长」算成具体分钟数——宁可空着，也不猜一个"看起来合理"的值。
+	defaultBantimeS = 0
+	// maxBantimeS 是 bantime_s 的上限（365 天），挡住把秒当毫秒/把天当秒的误填。
+	maxBantimeS = 365 * 24 * 3600
 	// maxRawTailLimit 是 raw_tail 的协议上限（最多回 500 条原始行）。
 	maxRawTailLimit = 500
 )
@@ -42,6 +47,7 @@ type guardConfig struct {
 	LogSource           string // auto | auth | journal
 	SuspiciousThreshold int    // 可疑 IP 阈值：单小时失败次数
 	RawTailLimit        int    // attempts 原始行回传上限（0 = 不回传，≤500）
+	BantimeS            int    // fail2ban 封禁时长（0 = 未知；用于推算封禁清单剩余时长）
 }
 
 // defaultGuardConfig 返回缺省防护配置。
@@ -51,6 +57,7 @@ func defaultGuardConfig() guardConfig {
 		LogSource:           defaultLogSource,
 		SuspiciousThreshold: defaultThreshold,
 		RawTailLimit:        defaultRawTailLimit,
+		BantimeS:            defaultBantimeS,
 	}
 }
 
@@ -73,6 +80,11 @@ func guardConfigFromEnv() guardConfig {
 			g.RawTailLimit = n
 		}
 	}
+	if v := os.Getenv("KORE_SSHGUARD_BANTIME_S"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= maxBantimeS {
+			g.BantimeS = n
+		}
+	}
 	return g
 }
 
@@ -88,8 +100,12 @@ type config struct {
 	// 为空时审计返回空检查项；本插件绝不自行读取 /etc/ssh/sshd_config。
 	sshdConfig string
 	startedAt  time.Time
-	// guard 是 SSH 防护统计参数（日志路径 / 日志源 / 可疑阈值 / 原始行上限）。
+	// guard 是 SSH 防护统计参数（日志路径 / 日志源 / 可疑阈值 / 原始行上限 / 封禁时长）。
 	guard guardConfig
+	// whitelist 是白名单（自保）：命中它的 IP 在封禁入口被直接拒绝，绝不下发到 fail2ban。
+	whitelist *whitelistStore
+	// banledger 记录本插件亲自执行的封禁时刻，用于封禁清单的「封禁时间/剩余时长」。
+	banledger *banLedger
 }
 
 // loadConfig 读取协议环境变量与预注入配置文本，并解析内嵌 manifest.json。
@@ -111,6 +127,10 @@ func loadConfig() (config, error) {
 		sshdConfig:   os.Getenv("KORE_SSHD_CONFIG"),
 		startedAt:    time.Now(),
 		guard:        guardConfigFromEnv(),
+		// 白名单落盘到插件自有数据目录（KORE_PLUGIN_DATA，0700 属主 kore-<id>），
+		// 不写安装目录外任何路径（ADR-0023）。
+		whitelist: newWhitelistStore(os.Getenv("KORE_PLUGIN_DATA")),
+		banledger: newBanLedger(),
 	}
 	if cfg.id == "" {
 		cfg.id = m.ID

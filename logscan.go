@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"net"
 	"regexp"
 	"sort"
@@ -17,6 +18,10 @@ type logEvent struct {
 	Kind    string
 	IP      string
 	HasTime bool
+	// Detail 是失败类型细分（只在 Kind ≠ success 时有值）：failed_password /
+	// invalid_user / too_many_attempts。Kind 保持三值不变（既有统计口径不动），
+	// 细分只用于「失败类型分布」，避免影响 attempts / bans 的既有计数。
+	Detail string
 }
 
 // 事件类别常量。
@@ -24,6 +29,13 @@ const (
 	kindFailed  = "failed"
 	kindInvalid = "invalid"
 	kindSuccess = "success"
+)
+
+// 失败类型细分常量（0.4.0 起用于 attempts.kinds 与封禁清单的触发规则）。
+const (
+	failKindPassword  = "failed_password"
+	failKindInvalidUs = "invalid_user"
+	failKindTooMany   = "too_many_attempts"
 )
 
 var (
@@ -37,6 +49,9 @@ var (
 	msgInvalidPattern = regexp.MustCompile(`^Invalid user \S+ from (\S+)`)
 	// msgAcceptedPattern 提取 Accepted（password/publickey 等）行的来源 IP。
 	msgAcceptedPattern = regexp.MustCompile(`^Accepted \S+ for \S+ from (\S+)`)
+	// msgTooManyPattern 提取"重复认证超限"行（PAM/sshd 的 maximum authentication
+	// attempts exceeded）的来源 IP——撞库被踢出来的高频来源。
+	msgTooManyPattern = regexp.MustCompile(`maximum authentication attempts exceeded.*from (\S+)`)
 )
 
 // parseSSHLogLine 解析一行 SSH 日志为事件；yearHint 供无年份的 syslog 时间戳补年。
@@ -48,15 +63,28 @@ func parseSSHLogLine(line string, yearHint int) (logEvent, bool) {
 		event.HasTime = true
 	}
 	msg := logMessage(line)
+	// 判定顺序：先成功/超限（都是不会被 Failed password 前缀命中的独立文本族），
+	// 再 Failed password，最后 Invalid user。顺序错会让 "Failed password for invalid user"
+	// 被归类成用户名探测，与 fail2ban 的判据不一致。
 	switch {
 	case msgAcceptedPattern.MatchString(msg):
 		event.Kind = kindSuccess
 		event.IP = msgAcceptedPattern.FindStringSubmatch(msg)[1]
+	case msgTooManyPattern.MatchString(msg):
+		event.Kind = kindFailed
+		event.Detail = failKindTooMany
+		event.IP = msgTooManyPattern.FindStringSubmatch(msg)[1]
 	case msgFailedPattern.MatchString(msg):
 		event.Kind = kindFailed
+		event.Detail = failKindPassword
+		if strings.Contains(msg, "invalid user") {
+			// 用户名不存在但仍尝试了密码：对运维有意义的是"撞库"，归到用户名探测更准确。
+			event.Detail = failKindInvalidUs
+		}
 		event.IP = msgFailedPattern.FindStringSubmatch(msg)[1]
 	case msgInvalidPattern.MatchString(msg):
 		event.Kind = kindInvalid
+		event.Detail = failKindInvalidUs
 		event.IP = msgInvalidPattern.FindStringSubmatch(msg)[1]
 	default:
 		return logEvent{}, false
@@ -123,6 +151,40 @@ type attemptStats struct {
 	EventsWithoutTime int
 	IPStats           []ipCount
 	Timeline          []hourCount
+	Kinds             []failureKindCount
+}
+
+// failureKindLabels 是失败类型的展示名（人话；页面直接展示，不在这里拼单位）。
+var failureKindLabels = map[string]string{
+	failKindPassword:  "密码认证失败",
+	failKindInvalidUs: "用户名探测（撞库/扫用户名）",
+	failKindTooMany:   "重复认证超限被断开",
+}
+
+// buildKindCounts 把「细分类型 → 次数」整理成降序分布并补占比（分母是 failed 总数）。
+func buildKindCounts(counts map[string]int, failed int) []failureKindCount {
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make([]failureKindCount, 0, len(counts))
+	for kind, count := range counts {
+		label := failureKindLabels[kind]
+		if label == "" {
+			label = kind
+		}
+		ratio := 0
+		if failed > 0 {
+			ratio = int(math.Round(float64(count) * 100 / float64(failed)))
+		}
+		out = append(out, failureKindCount{Kind: kind, Label: label, Count: count, Ratio: ratio})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Kind < out[j].Kind
+	})
+	return out
 }
 
 // perIP 统计单个来源 IP 的成功/失败次数。
@@ -140,6 +202,7 @@ func aggregateEvents(events []logEvent, since, until time.Time, topN int) attemp
 	stats := attemptStats{}
 	ips := map[string]*perIP{}
 	hours := map[string]*hourCount{}
+	kinds := map[string]int{}
 	for _, e := range events {
 		if e.HasTime && !since.IsZero() && e.At.Before(since) {
 			continue
@@ -156,6 +219,9 @@ func aggregateEvents(events []logEvent, since, until time.Time, topN int) attemp
 			stats.Failed++
 		case kindFailed:
 			stats.Failed++
+		}
+		if e.Kind != kindSuccess && e.Detail != "" {
+			kinds[e.Detail]++
 		}
 		if !e.HasTime {
 			stats.EventsWithoutTime++
@@ -187,7 +253,75 @@ func aggregateEvents(events []logEvent, since, until time.Time, topN int) attemp
 	stats.UniqueIPs = len(ips)
 	stats.IPStats = rankIPs(ips, topN)
 	stats.Timeline = sortHours(hours)
+	stats.Kinds = buildKindCounts(kinds, stats.Failed)
 	return stats
+}
+
+// ipFacts 是单个来源 IP 在统计窗口内的行为事实（封禁清单与白名单候选共用）。
+type ipFacts struct {
+	Failures    int
+	FirstFail   time.Time
+	LastFail    time.Time
+	HasFail     bool
+	Successes   int
+	LastSuccess time.Time
+	HasSuccess  bool
+}
+
+// indexIPFacts 按 IP 汇总失败/成功次数与首末时刻（无时间戳的事件只计数，不参与时刻）。
+func indexIPFacts(events []logEvent) map[string]*ipFacts {
+	facts := make(map[string]*ipFacts, len(events))
+	for _, e := range events {
+		item, ok := facts[e.IP]
+		if !ok {
+			item = &ipFacts{}
+			facts[e.IP] = item
+		}
+		if e.Kind == kindSuccess {
+			item.Successes++
+			if e.HasTime && (!item.HasSuccess || e.At.After(item.LastSuccess)) {
+				item.LastSuccess, item.HasSuccess = e.At, true
+			}
+			continue
+		}
+		item.Failures++
+		if e.HasTime {
+			if !item.HasFail || e.At.Before(item.FirstFail) {
+				item.FirstFail = e.At
+			}
+			if !item.HasFail || e.At.After(item.LastFail) {
+				item.LastFail = e.At
+			}
+			item.HasFail = true
+		}
+	}
+	return facts
+}
+
+// loginCandidates 从 IP 事实里挑"最近成功登录的来源 IP"，作为「你的 IP」候选：
+// 按最后成功时刻降序，最多 limit 条；没有时间戳的成功事件不算候选（无法判断新旧）。
+func loginCandidates(facts map[string]*ipFacts, limit int) []loginCandidate {
+	out := make([]loginCandidate, 0, len(facts))
+	for ip, item := range facts {
+		if !item.HasSuccess {
+			continue
+		}
+		out = append(out, loginCandidate{
+			IP:       ip,
+			LastSeen: item.LastSuccess.Local().Format(time.RFC3339),
+			Success:  item.Successes,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LastSeen != out[j].LastSeen {
+			return out[i].LastSeen > out[j].LastSeen
+		}
+		return out[i].IP < out[j].IP
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // rankIPs 按（失败数 desc → 成功数 desc → IP asc）排序并截断 topN。

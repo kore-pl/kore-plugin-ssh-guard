@@ -57,11 +57,15 @@ func dispatch(request *pluginapi.Request, cfg *config, logger *slog.Logger) (*pl
 	case "config.set":
 		perr = handleConfigSet(request.Params, cfg, response)
 	case "ban.list":
-		perr = handleBanList(request.Params, response)
+		perr = handleBanList(request.Params, *cfg, response)
 	case "suggest":
 		perr = handleSuggest(request.Params, response)
+	case "whitelist":
+		perr = handleWhitelist(*cfg, response)
+	case "whitelist.add", "whitelist.remove":
+		perr = handleWhitelistWrite(request.Params, verb, *cfg, response)
 	case "ban.add", "ban.remove":
-		perr = handleBanWrite(request.Params, verb, guardRootAction, response)
+		perr = handleBanWrite(request.Params, verb, guardRootAction, *cfg, response)
 	default:
 		perr = notFound(verb)
 	}
@@ -76,7 +80,8 @@ func dispatch(request *pluginapi.Request, cfg *config, logger *slog.Logger) (*pl
 func businessVerb(method, id string) (string, bool) {
 	verb := strings.TrimPrefix(method, id+".")
 	switch verb {
-	case "status", "attempts", "bans", "config.get", "config.set", "ban.list", "ban.add", "ban.remove", "suggest":
+	case "status", "attempts", "bans", "config.get", "config.set", "ban.list", "ban.add", "ban.remove", "suggest",
+		"whitelist", "whitelist.add", "whitelist.remove":
 		return verb, true
 	default:
 		return "", false
@@ -154,22 +159,6 @@ func parseConfigText(raw json.RawMessage, cfg config) (string, string, *pluginap
 	return text, source, nil
 }
 
-// handleBanList 返回结构化封禁清单；basic 骨架不含真实封禁执行器，恒为空且 applied=false。
-func handleBanList(raw json.RawMessage, response *pluginapi.Response) *pluginapi.Error {
-	p, perr := parseBanParams(raw)
-	if perr != nil {
-		return perr
-	}
-	response.Result = encode(banListResult{
-		Bans:    []banEntry{},
-		Count:   0,
-		Limit:   p.Limit,
-		Offset:  p.Offset,
-		Applied: false,
-	})
-	return nil
-}
-
 // parseBanParams 校验 ssh.ban.list 入参：limit 1..100、offset ≥0、address 为合法 IP。
 func parseBanParams(raw json.RawMessage) (banParams, *pluginapi.Error) {
 	p := banParams{Limit: 20}
@@ -188,7 +177,10 @@ func parseBanParams(raw json.RawMessage) (banParams, *pluginapi.Error) {
 		return p, invalidParam("offset 不能为负")
 	}
 	if p.Address != "" && net.ParseIP(p.Address) == nil {
-		return p, invalidParam("address 不是合法 IP 地址")
+		return p, invalidParam("address 不是合法 IP 地址（例：203.0.113.7）")
+	}
+	if p.Source != "" && p.Source != "auto" && p.Source != "auth" && p.Source != "journal" {
+		return p, invalidParam("source 只支持 auto/auth/journal")
 	}
 	return p, nil
 }
@@ -284,6 +276,7 @@ func handleAttempts(raw json.RawMessage, cfg *config, response *pluginapi.Respon
 		TimelineHourly:    stats.Timeline,
 		RawLines:          len(lines),
 		Truncated:         truncated,
+		Kinds:             stats.Kinds,
 		Note:              note,
 	}
 	if stats.IPStats == nil {
@@ -324,53 +317,19 @@ func handleBans(raw json.RawMessage, cfg *config, response *pluginapi.Response) 
 	if perr != nil {
 		return perr
 	}
-	st := probeFail2ban(guardRootAction)
-	if st.Active {
-		bans := make([]banItem, 0, len(st.BannedIPs))
-		for _, ip := range st.BannedIPs {
-			bans = append(bans, banItem{Address: ip, Reason: "fail2ban sshd jail 当前封禁中"})
-		}
-		response.Result = encode(bansResult{
-			Available: true,
-			Engine:    "fail2ban",
-			Source:    "fail2ban",
-			Threshold: cfg.guard.SuspiciousThreshold,
-			Bans:      bans,
-			Count:     len(bans),
-			Applied:   false,
-		})
-		return nil
-	}
-	// 降级：从日志推断可疑 IP（最近 24h 窗口内按小时分桶取最大值）。
-	source := cfg.guard.LogSource
-	if p.Source != "" {
-		source = p.Source
-	}
-	g := cfg.guard
-	g.LogSource = source
-	lines, usedSource, _, note := collectLogLines(g, time.Now().Add(-24*time.Hour))
-	events := parseEvents(lines)
-	bans := suspiciousIPs(events, cfg.guard.SuspiciousThreshold)
-	if st.Installed && !st.Active {
-		note = joinNote(note, "fail2ban 已安装但不可用（需 root/adm 权限访问 socket），清单来自日志推断")
-	}
-	if usedSource == "none" {
-		note = joinNote(note, "无可用日志源，无法推断可疑 IP")
-	}
-	result := bansResult{
-		Available: usedSource != "none",
-		Engine:    "sshd",
-		Source:    usedSource,
+	// 与 ban.list 共用同一套组装逻辑（同一份事实、同一套来源/触发规则口径），
+	// 差别只在形状：bans 是旧契约（阈值 + 引擎摘要），ban.list 是可分页的详细清单。
+	items, source, engine, available, note := collectBanItems(*cfg, p.Source)
+	response.Result = encode(bansResult{
+		Available: available,
+		Engine:    engine,
+		Source:    source,
 		Threshold: cfg.guard.SuspiciousThreshold,
-		Bans:      bans,
-		Count:     len(bans),
+		Bans:      items,
+		Count:     len(items),
 		Applied:   false,
 		Note:      note,
-	}
-	if result.Bans == nil {
-		result.Bans = []banItem{}
-	}
-	response.Result = encode(result)
+	})
 	return nil
 }
 
@@ -403,6 +362,7 @@ func handleConfigGet(cfg *config, response *pluginapi.Response) *pluginapi.Error
 		LogSource:           cfg.guard.LogSource,
 		SuspiciousThreshold: cfg.guard.SuspiciousThreshold,
 		RawTailLimit:        cfg.guard.RawTailLimit,
+		BantimeS:            cfg.guard.BantimeS,
 		Persisted:           false,
 		Note:                "配置仅当前插件进程会话内生效（lifecycle=lazy 不落盘；进程退出后回到环境变量/缺省值）",
 	})
@@ -447,6 +407,12 @@ func handleConfigSet(raw json.RawMessage, cfg *config, response *pluginapi.Respo
 		}
 		cfg.guard.RawTailLimit = *p.RawTailLimit
 	}
+	if p.BantimeS != nil {
+		if *p.BantimeS < 0 || *p.BantimeS > maxBantimeS {
+			return invalidParam("bantime_s 必须在 0..31536000（0 表示未知，不推算剩余时长）")
+		}
+		cfg.guard.BantimeS = *p.BantimeS
+	}
 	return handleConfigGet(cfg, response)
 }
 
@@ -465,7 +431,7 @@ func protectionPtr(info protectionInfo) *protectionInfo { return &info }
 // 降权口径（ADR-0018）：插件以非 root 运行且永不提权，命令一律由内核经 systemd-run 代理。
 // 通道三要素（KORE_KERNEL_SOCK / KORE_PLUGIN_TOKEN / KORE_PLUGIN_ID）缺一时返回 E_NEED_ROOT +
 // 可操作 hint，不假装成功；执行后必须回读封禁清单证明生效（Verified），回读不可用则显式说明。
-func handleBanWrite(raw json.RawMessage, verb string, call rootActionFunc, response *pluginapi.Response) *pluginapi.Error {
+func handleBanWrite(raw json.RawMessage, verb string, call rootActionFunc, cfg config, response *pluginapi.Response) *pluginapi.Error {
 	p := banWriteParams{}
 	if len(raw) != 0 && string(raw) != "null" {
 		if raw[0] != '{' {
@@ -485,6 +451,12 @@ func handleBanWrite(raw json.RawMessage, verb string, call rootActionFunc, respo
 	action := rootActionFail2banBanIP
 	if verb == "ban.remove" {
 		action = rootActionFail2banUnbanIP
+	}
+	// 白名单前置门（fail-closed）：要封的 IP 在白名单里 → 直接拒绝，命令根本不下发。
+	// 放在提权通道检查之前，是为了让"防误封"在**任何环境**（包括没 root 的调试实例）都成立，
+	// 且错误原因指向用户真正该改的地方（白名单），而不是"没权限"。
+	if verb == "ban.add" && cfg.whitelist.Contains(address) {
+		return whitelistRefusal(verb, address)
 	}
 	if call == nil {
 		detail, _ := json.Marshal(rootHintDetail{
@@ -514,6 +486,12 @@ func handleBanWrite(raw json.RawMessage, verb string, call rootActionFunc, respo
 	}
 	if out.ExitCode != 0 {
 		return banExecFailed(action, address, out)
+	}
+	// 封禁成功才记账：账本只服务「封禁时间/剩余时长」展示，失败的动作不记。
+	if verb == "ban.add" {
+		cfg.banledger.Record(address, time.Now(), "")
+	} else {
+		cfg.banledger.Forget(address)
 	}
 	banned, count, verified, note := verifyBan(call, address, verb)
 	response.Result = encode(banWriteResult{

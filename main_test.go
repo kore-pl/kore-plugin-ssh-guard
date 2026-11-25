@@ -34,6 +34,9 @@ func testConfig() config {
 		capabilities: []string{"system:admin"},
 		startedAt:    time.Now(),
 		guard:        defaultGuardConfig(),
+		// 白名单与封禁账本：不落盘（dataDir 空串 = 进程内），单测不写宿主任何目录。
+		whitelist: newWhitelistStore(""),
+		banledger: newBanLedger(),
 	}
 }
 

@@ -34,20 +34,22 @@ type auditCheck struct {
 	Advice      string `json:"advice"`
 }
 
-// banEntry 是封禁清单中的单条记录（骨架阶段不产生真实记录）。
-type banEntry struct {
-	Address string `json:"address"`
-	Reason  string `json:"reason"`
-	Until   string `json:"until"`
-}
-
-// banListResult 是 ssh.ban.list 的结构化结果。
+// banListResult 是 ssh.ban.list 的结构化结果：真实封禁清单（fail2ban jail 当前封禁）
+// 或降级态的日志推断候选，两者共用 banItem 形状，source 字段区分事实来源。
 type banListResult struct {
-	Bans    []banEntry `json:"bans"`
-	Count   int        `json:"count"`
-	Limit   int        `json:"limit"`
-	Offset  int        `json:"offset"`
-	Applied bool       `json:"applied"`
+	Bans      []banItem `json:"bans"`
+	Count     int       `json:"count"`
+	Total     int       `json:"total"`
+	Limit     int       `json:"limit"`
+	Offset    int       `json:"offset"`
+	Engine    string    `json:"engine"` // fail2ban | sshd | none
+	Source    string    `json:"source"` // fail2ban | auth | journal | none
+	Available bool      `json:"available"`
+	Applied   bool      `json:"applied"`
+	// Whitelisted 是清单里落在白名单的条数：>0 说明"白名单 IP 仍被封着"（自锁风险），
+	// 页面要给出醒目的一键解封入口。
+	Whitelisted int    `json:"whitelisted"`
+	Note        string `json:"note,omitempty"`
 }
 
 // banParams 是 ssh.ban.list 的入参；Limit 有默认值，用一个指针区分"未设置"与"显式 0"。
@@ -55,7 +57,9 @@ type banParams struct {
 	Limit   int    `json:"limit"`
 	Offset  int    `json:"offset"`
 	Address string `json:"address"`
-	limit   *int   `json:"-"`
+	// Source 覆盖日志源（auto|auth|journal），与 ssh.bans 同口径。
+	Source string `json:"source"`
+	limit  *int   `json:"-"`
 }
 
 // limitSet 报告 limit 是否被显式设置（显式 0 也必须判为越界）。
@@ -67,6 +71,7 @@ func (p *banParams) UnmarshalJSON(raw []byte) error {
 		Limit   *int   `json:"limit"`
 		Offset  int    `json:"offset"`
 		Address string `json:"address"`
+		Source  string `json:"source"`
 	}
 	var a alias
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -74,6 +79,7 @@ func (p *banParams) UnmarshalJSON(raw []byte) error {
 	}
 	p.Offset = a.Offset
 	p.Address = a.Address
+	p.Source = a.Source
 	p.limit = a.Limit
 	if a.Limit != nil {
 		p.Limit = *a.Limit
@@ -123,6 +129,18 @@ type hourCount struct {
 	Success int    `json:"success"`
 }
 
+// failureKindCount 是失败类型的聚合条目（"谁在怎么试"）。
+//
+// 类型只来自日志里真实存在的文本族，不自造分类：密码认证失败（Failed password）、
+// 用户名探测（Invalid user）、重复认证超限（maximum authentication attempts exceeded）。
+type failureKindCount struct {
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
+	Count int    `json:"count"`
+	// Ratio 是占 failed 的整数百分比（0–100）。
+	Ratio int `json:"ratio"`
+}
+
 // attemptsResult 是 ssh.attempts 的结构化结果；raw_tail 已做用户名脱敏。
 type attemptsResult struct {
 	Source            string      `json:"source"`
@@ -136,18 +154,38 @@ type attemptsResult struct {
 	EventsWithoutTime int         `json:"events_without_time"`
 	TopIPs            []ipCount   `json:"top_ips"`
 	TimelineHourly    []hourCount `json:"timeline_hourly"`
-	RawLines          int         `json:"raw_lines"`
-	RawTail           []string    `json:"raw_tail"`
-	Truncated         bool        `json:"truncated"`
-	Note              string      `json:"note,omitempty"`
+	// Kinds 是按失败类型聚合的分布（按次数降序）；没有失败时为 null。
+	Kinds     []failureKindCount `json:"kinds,omitempty"`
+	RawLines  int                `json:"raw_lines"`
+	RawTail   []string           `json:"raw_tail"`
+	Truncated bool               `json:"truncated"`
+	Note      string             `json:"note,omitempty"`
 }
 
 // banItem 是封禁/可疑 IP 清单的单条记录（fail2ban 实封或日志推断）。
+//
+// "封禁可视化"的口径（0.4.0）：一条记录要能回答运维最常问的五件事——谁被拦了
+// （address）、凭什么被拦（rule/reason）、封了多久（banned_at）、还剩多久
+// （remaining_s，读不到时为 null，不做假值）、我在名单里吗（whitelisted）。
 type banItem struct {
 	Address  string `json:"address"`
 	Failures int    `json:"failures"`
 	LastSeen string `json:"last_seen,omitempty"`
 	Reason   string `json:"reason"`
+	// Source 是事实来源："fail2ban"（jail 当前封禁）| "log"（日志推断的可疑 IP，没有真封）。
+	Source string `json:"source"`
+	// Rule 是触发规则（一句人话，含阈值/窗口/jail 名）。
+	Rule string `json:"rule,omitempty"`
+	// BannedAt 是封禁时刻（本地 RFC3339）；BannedAtSource 说明来源：
+	// "observed"=本插件执行封禁时自己记下的时刻、"log"=该 IP 在日志里的最后一次失败
+	// （fail2ban 正好在失败阈值处封禁，属推断）、"unknown"=读不到。
+	BannedAt       string `json:"banned_at,omitempty"`
+	BannedAtSource string `json:"banned_at_source,omitempty"`
+	// RemainingS 是剩余封禁秒数；nil 表示读不到（fail2ban 的 bantime 不在内核提权
+	// 形状表内，插件不做没有依据的推测）。运维在页面填入 bantime 后才可推算。
+	RemainingS *int64 `json:"remaining_s,omitempty"`
+	// Whitelisted 表示该 IP 在白名单里（此时它本不该被封；页面提示一键解封）。
+	Whitelisted bool `json:"whitelisted"`
 }
 
 // bansResult 是 ssh.bans 的结构化结果；applied 恒为 false（本插件不执行封禁）。
@@ -168,8 +206,11 @@ type configResult struct {
 	LogSource           string `json:"log_source"`
 	SuspiciousThreshold int    `json:"suspicious_threshold"`
 	RawTailLimit        int    `json:"raw_tail_limit"`
-	Persisted           bool   `json:"persisted"`
-	Note                string `json:"note"`
+	// BantimeS 是 fail2ban 的封禁时长（秒；0 = 未知/不自动到期）。插件读不到宿主
+	// fail2ban 的 bantime（不在提权形状表内），由运维在页面填写后用于推算剩余时长。
+	BantimeS  int    `json:"bantime_s"`
+	Persisted bool   `json:"persisted"`
+	Note      string `json:"note"`
 }
 
 // configSetParams 是 ssh.config.set 的入参；全指针字段，未设置 = 不修改。
@@ -178,6 +219,53 @@ type configSetParams struct {
 	LogSource           *string `json:"log_source"`
 	SuspiciousThreshold *int    `json:"suspicious_threshold"`
 	RawTailLimit        *int    `json:"raw_tail_limit"`
+	BantimeS            *int    `json:"bantime_s"`
+}
+
+// whitelistEntry 是白名单里的单条记录。
+type whitelistEntry struct {
+	IP      string `json:"ip"`
+	AddedAt string `json:"added_at"`
+	// Note 是加入时的语境（例："最近一次成功 SSH 登录的 IP" / "手动填写"）。
+	Note string `json:"note,omitempty"`
+}
+
+// loginCandidate 是"可能是你自己"的来源 IP 候选：来自成功登录日志。
+//
+// 为什么用登录日志当"当前 IP"：面板拿不到浏览器出口 IP（内核不透出客户端 IP，
+// 见 internal/core/httpapi/audit_http.go 的 maskedClientIP 只给脱敏值），而 fail2ban
+// 封的正是 SSH 来源 IP——管理员自己的 SSH 出口 IP 恰好就写在 sshd 的 Accepted 行里。
+// 因此用"最近成功登录的来源 IP"作为「你的 IP」候选，并在页面上明确标注口径。
+type loginCandidate struct {
+	IP       string `json:"ip"`
+	LastSeen string `json:"last_seen"`
+	Success  int    `json:"success"`
+}
+
+// whitelistResult 是 ssh.whitelist 的结果：白名单现状 + 「你的 IP」候选 + 自锁告警。
+type whitelistResult struct {
+	Entries []whitelistEntry `json:"entries"`
+	Count   int              `json:"count"`
+	// Persisted / Path / Note 说明白名单是否真的落盘（不落盘时只在本次运行内生效）。
+	Persisted bool   `json:"persisted"`
+	Path      string `json:"path,omitempty"`
+	Note      string `json:"note,omitempty"`
+	// Candidates 是最近成功 SSH 登录的来源 IP（最新在前，最多 5 条）。
+	Candidates []loginCandidate `json:"candidates"`
+	// CurrentIP 是候选里最新的那条，即「你最近一次 SSH 登录用的 IP」；读不到为空。
+	CurrentIP string `json:"current_ip,omitempty"`
+	// CurrentWhitelisted 回答"当前 IP 是否在白名单"。
+	CurrentWhitelisted bool `json:"current_whitelisted"`
+	// BannedWhitelisted 是「在白名单却被封着」的 IP：自锁风险，页面提供一键解封。
+	BannedWhitelisted []string `json:"banned_whitelisted"`
+	// LogSource 是候选来源（auth | journal | none）。
+	LogSource string `json:"log_source"`
+}
+
+// whitelistWriteParams 是 ssh.whitelist.add / ssh.whitelist.remove 的入参。
+type whitelistWriteParams struct {
+	IP   string `json:"ip"`
+	Note string `json:"note,omitempty"`
 }
 
 // banWriteParams 是 ssh.ban.add / ssh.ban.remove 的入参。

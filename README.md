@@ -24,13 +24,16 @@ kore 的 **SSH 加固插件**（配置审计 + 攻击统计 + 封禁视图）。
 | 方法（裸名 / 全名） | 行为 |
 | --- | --- |
 | `ssh-guard.status` / `status` | 只读配置审计（5 条规则，`checks`/`total`/`issues`/`applied:false`）**+ 防护源检测** `protection`（fail2ban 状态经 `fail2ban-status` root 动作读取） |
-| `ssh-guard.attempts {since?, source?, raw_limit?}` / `attempts` | SSH 攻击尝试统计：`{total, failed, invalid_users, successful_logins, unique_ips, top_ips, timeline_hourly, raw_tail, truncated}` |
+| `ssh-guard.attempts {since?, source?, raw_limit?}` / `attempts` | SSH 攻击尝试统计：`{total, failed, invalid_users, successful_logins, unique_ips, top_ips, timeline_hourly, kinds, raw_tail, truncated}`；`kinds` 是按失败类型的分布（`failed_password` 密码认证失败 / `invalid_user` 用户名探测 / `too_many_attempts` 重复认证超限，含 `count` 与占 `failed` 的 `ratio` 百分比） |
 | `ssh-guard.bans {source?}` / `bans` | 当前封禁/可疑 IP 清单：fail2ban 经 root 通道可读时取 sshd jail；否则按可疑阈值从日志推断 |
 | `ssh-guard.config.get` / `config.get` | 读运行配置（日志路径 / 日志源 / 可疑阈值 / 原始行上限） |
 | `ssh-guard.config.set {...}` / `config.set` | 进程内改写运行配置（校验后生效；lazy 生命周期**不落盘**，进程退出回到环境变量/缺省值） |
-| `ssh-guard.ban.add {ip, confirm}` / `ban.add` | **真实封禁**：经 `fail2ban-banip` root 动作执行 `fail2ban-client set sshd banip <ip>`；不可逆动作，必须带一次性 `confirm` 令牌；执行后回读封禁清单（`verified`） |
+| `ssh-guard.ban.add {ip, confirm}` / `ban.add` | **真实封禁**：经 `fail2ban-banip` root 动作执行 `fail2ban-client set sshd banip <ip>`；不可逆动作，必须带一次性 `confirm` 令牌；执行后回读封禁清单（`verified`）。**白名单 IP 直接拒绝（`E_CONFLICT`）**，命令不下发 |
 | `ssh-guard.ban.remove {ip}` / `ban.remove` | **真实解封**：经 `fail2ban-unbanip` root 动作执行 `fail2ban-client set sshd unbanip <ip>`；恢复性动作，无需令牌；执行后回读（`verified`） |
-| `ssh-guard.ban.list` / `ban.list` | 0.1.0 兼容保留：参数校验 + 空清单回显 |
+| `ssh-guard.ban.list {limit?, offset?, address?, source?}` / `ban.list` | **可分页封禁清单（0.4.0 起为真实实现）**：每条给 `address` / `source`（`fail2ban` 真封 · `log` 日志推断）/ `rule`（触发规则）/ `banned_at` + `banned_at_source`（`observed` 本插件亲测 · `log` 推断 · `unknown`）/ `remaining_s`（未知为 null，不编造）/ `whitelisted`；`whitelisted` 字段统计"白名单里却仍被封着"的条数 |
+| `ssh-guard.whitelist` / `whitelist` | **白名单现状（只读）**：`{entries[], count, persisted, path, candidates[], current_ip, current_whitelisted, banned_whitelisted[], log_source}`；`candidates` 是最近成功 SSH 登录的来源 IP（"你的 IP 是哪条"的候选），`banned_whitelisted` 是自锁告警 |
+| `ssh-guard.whitelist.add {ip, note?}` / `whitelist.add` | 加入白名单（保护性配置，无需 confirm 令牌；幂等）。落盘 `<KORE_PLUGIN_DATA>/whitelist.json`（0600，临时文件 + rename）；返回 `{ip, added, whitelist}` |
+| `ssh-guard.whitelist.remove {ip}` / `whitelist.remove` | 移出白名单（幂等）；返回 `{ip, removed, whitelist}` |
 | `ssh-guard.suggest` / `suggest` | **只读建议态（dry_run=true，不写宿主）**：按 `{disable_password_auth?, disable_root_login?, port?, max_auth_tries?}` 渲染 `/etc/ssh/sshd_config.d/kore.conf` 建议文本，并返回 `path_hint`、`diff_from_current`（可读主配置时）、`risk[]`（含回滚说明）、`apply_commands[]`（cp -a 备份 → install/tee 写入 → `sshd -t` → `systemctl reload sshd`）、`verify_commands[]`（`sshd -T`） |
 | `kore.ping` / `kore.reload` / `kore.shutdown` | 协议必选方法；`kore.reload` 无外部配置，`config_digest` 为空 |
 
@@ -124,6 +127,8 @@ ssh-guard.ban.remove {"ip":"203.0.113.7"}
 | 类别 | 方法 | 能力 |
 | --- | --- | --- |
 | 只读（6） | `status` / `attempts` / `bans` / `ban.list` / `suggest` / `config.get` | `system:read` |
+| 只读（0.4.0 新增） | `whitelist` | `system:read` |
+| 写（0.4.0 新增） | `whitelist.add` / `whitelist.remove` | `system:admin` |
 | 写（3） | `ban.add` / `ban.remove` / `config.set` | `system:admin` |
 
 收益：只读调用（含配置读取）按 `system:read` 判定，不再按插件级 `system:admin` 写 `invoke.*` 审计
@@ -194,7 +199,7 @@ ssh-guard.ban.remove {"ip":"203.0.113.7"}
 
 ```bash
 make build   # CGO_ENABLED=0 GOAMD64=v1 go build -trimpath -buildvcs=false -ldflags="-s -w" -o bin/ssh-guard .
-make dist    # 产出 dist/ssh-guard-0.3.1.tar.gz（info.json + bin/ssh-guard + SHA256SUMS）与同名 .sha256
+make dist    # 产出 dist/ssh-guard-0.4.0.tar.gz（info.json + bin/ssh-guard + SHA256SUMS）与同名 .sha256
 make check   # gofmt → go vet → go test -timeout 200s
 ```
 
@@ -254,7 +259,7 @@ make check   # gofmt → go vet → go test -timeout 200s
 - **行为准则**：[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 - **兼容性**：`protocol: kore.plugin.v1` · `requires_kore: >=0.1.0 <0.2.0` · `lifecycle: lazy` · 深度等级 `basic`（0.3.1 起；`production` 需先补方法级故障注入，见 v1.1）。
 - **验证方式**：本地 `make check` 优先（CI 只在 push main / tag / PR / 手动跑；发布前 `make dist` 连跑两次核对 sha 一致）。
-- **发布产物**：`make dist` → `dist/ssh-guard-0.3.1.tar.gz` + `.sha256`（位级可复现，连跑两次 sha 相同）。
+- **发布产物**：`make dist` → `dist/ssh-guard-0.4.0.tar.gz` + `.sha256`（位级可复现，连跑两次 sha 相同）。
 - **相关仓库**：[索引 kore-plugins](https://github.com/kore-pl/kore-plugins) · [协议文档](https://github.com/kore-pl/kore/blob/main/docs/PLUGIN-PROTOCOL.md) · [SDK 指南](https://github.com/kore-pl/kore/blob/main/docs/PLUGIN-SDK.md)
 
 <!-- oss:end -->
