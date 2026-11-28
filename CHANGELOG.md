@@ -3,6 +3,20 @@
 本仓库遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
 
+## [0.5.0] - 2026-11-28
+
+### 新增（sshd drop-in 一键应用 / 回滚）
+
+- `ssh-guard.apply-hardening`：复用 `ssh-guard.suggest` 的 `config_text` 渲染，经内核 `sshd-dropin-write` 受控写（`file_write`：`sshd.config.d` / `0644` / `sshd.dropin.v1` / 64 KiB）写入 `kore-ssh-guard-*.conf` drop-in；不 reload sshd，下次 sshd 重载/重启才生效。
+- `ssh-guard.rollback-hardening`：按 `changes.jsonl` 的结构化 `purge_op` 回滚本插件写入的 drop-in（新建→`file.remove`；覆盖→`file.restore`），逐字节且逐属性还原，不执行任何 shell 命令。
+- 主壳加固面板提供「一键应用 / 回滚」入口：确认框列出文件名、指令 diff、风险、回滚方式、会话保活提示；沿用 `KoreUI` 错误映射与管理员 confirm 提示。
+- `method_capabilities` 新增两条 `system:admin` 方法；`requires_kore` 下界收窄到 `>=0.1.6`（账本 mode 守恒硬前置）；插件 SDK 升到 `pluginapi v0.4.0`（`sshd.config.d` 类目 + `sshd.dropin.v1` 策略）。旧的 `ssh-guard.suggest` 保留为 dry-run 预览。
+
+### 边界
+
+- 应用只写 drop-in，不执行 `systemctl reload/restart sshd`；写入后请保留现有密钥会话、另开会话确认后再自行 reload。
+- allowlist 只保证文本形状安全，不消除禁用密码登录等业务后果；真机长时窗口由隔离 VM 复验（P3）承担。
+
 ## [0.4.1] - 2026-11-26
 
 ### 变更

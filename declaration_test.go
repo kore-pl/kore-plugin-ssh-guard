@@ -4,16 +4,76 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+
+	"github.com/pengtang1024/kore/pkg/pluginapi"
 )
 
 // declaredRootAction / declaredManifest 是 info.json 里本仓关心的声明字段（显式定形，
 // 不用 map[string]any：G-24）。
 type declaredRootAction struct {
-	ID           string   `json:"id"`
-	Argv         []string `json:"argv"`
-	TimeoutS     int      `json:"timeout_s"`
-	Description  string   `json:"description"`
-	Irreversible bool     `json:"irreversible"`
+	ID           string                `json:"id"`
+	Argv         []string              `json:"argv"`
+	TimeoutS     int                   `json:"timeout_s"`
+	Description  string                `json:"description"`
+	Irreversible bool                  `json:"irreversible"`
+	WritesHost   bool                  `json:"writes_host"`
+	Target       string                `json:"target"`
+	FileWrite    *pluginapi.FileWrite  `json:"file_write,omitempty"`
+	FileDelete   *pluginapi.FileDelete `json:"file_delete,omitempty"`
+	PurgeOp      *pluginapi.PurgeOp    `json:"purge_op,omitempty"`
+}
+
+// TestRootActionsDeclared 双向一致：info.json 的 root action id 集合必须恰好等于
+// 代码引用常量集合，file_write / file_delete 声明形状也必须逐字段锁定（G-31 / ADR-0060）。
+func TestRootActionsDeclared(t *testing.T) {
+	m := loadDeclaredManifest(t)
+	codeIDs := map[string]bool{
+		rootActionFail2banStatus:  true,
+		rootActionFail2banBanIP:   true,
+		rootActionFail2banUnbanIP: true,
+		rootActionSSHDWrite:       true,
+		rootActionSSHDDelete:      true,
+	}
+	if len(m.RootActions) != len(codeIDs) {
+		t.Fatalf("info.json 声明 %d 条 root_actions，代码常量 %d 条（必须双向一致）", len(m.RootActions), len(codeIDs))
+	}
+	declared := make(map[string]declaredRootAction, len(m.RootActions))
+	for _, action := range m.RootActions {
+		if !codeIDs[action.ID] {
+			t.Fatalf("声明 %q 在代码中没有对应常量/调用点（声明未使用）", action.ID)
+		}
+		declared[action.ID] = action
+	}
+	for id := range codeIDs {
+		if _, ok := declared[id]; !ok {
+			t.Fatalf("代码常量 %q 未在 info.json 声明", id)
+		}
+	}
+	write := declared[rootActionSSHDWrite]
+	if err := pluginapi.ValidateRootAction(pluginapi.RootAction{
+		ID: write.ID, FileWrite: write.FileWrite, WritesHost: write.WritesHost, Target: write.Target,
+	}); err != nil {
+		t.Fatalf("sshd-dropin-write 声明不合协议：%v", err)
+	}
+	if write.FileWrite == nil || write.FileWrite.PrefixClass != "sshd.config.d" ||
+		write.FileWrite.Mode != pluginapi.FileWriteModeRoot0644 ||
+		write.FileWrite.ContentPolicy != pluginapi.ContentPolicySSHDropin ||
+		write.FileWrite.MaxBytes != 65536 {
+		t.Fatalf("sshd-dropin-write file_write 形状不符：%+v", write.FileWrite)
+	}
+	if !write.WritesHost || write.Target != dropInDir() || write.PurgeOp != nil {
+		t.Fatalf("sshd-dropin-write 必须 writes_host=true、target=%q、无静态 purge_op：%+v", dropInDir(), write)
+	}
+	del := declared[rootActionSSHDDelete]
+	if err := pluginapi.ValidateRootAction(pluginapi.RootAction{
+		ID: del.ID, FileDelete: del.FileDelete, WritesHost: del.WritesHost, Target: del.Target,
+	}); err != nil {
+		t.Fatalf("sshd-dropin-delete 声明不合协议：%v", err)
+	}
+	if del.FileDelete == nil || del.FileDelete.PrefixClass != "sshd.config.d" ||
+		!del.WritesHost || del.Target != dropInDir() || del.PurgeOp != nil {
+		t.Fatalf("sshd-dropin-delete file_delete 形状不符：%+v", del)
+	}
 }
 
 type declaredManifest struct {
@@ -56,13 +116,9 @@ func TestFail2banPathsMatchInfoJSON(t *testing.T) {
 		rootActionFail2banBanIP:   true,
 		rootActionFail2banUnbanIP: true,
 	}
-	if len(m.RootActions) != len(codeIDs) {
-		t.Fatalf("info.json 声明 %d 条 root_actions，代码引用的常量 %d 条（必须一一对应）",
-			len(m.RootActions), len(codeIDs))
-	}
 	for _, action := range m.RootActions {
 		if !codeIDs[action.ID] {
-			t.Fatalf("声明 %q 在代码中没有对应常量/调用点（声明未使用）", action.ID)
+			continue // file_write / file_delete 动作无 argv，由 TestRootActionsDeclared 校验
 		}
 		if len(action.Argv) == 0 {
 			t.Fatalf("%s 的 argv 为空", action.ID)
@@ -99,6 +155,8 @@ func TestIrreversibleSemantics(t *testing.T) {
 		rootActionFail2banStatus:  false,
 		rootActionFail2banBanIP:   true,
 		rootActionFail2banUnbanIP: false,
+		rootActionSSHDWrite:       false, // 可回滚（运行时 purge_op），不强制 confirm
+		rootActionSSHDDelete:      false, // 受控删除强制备份，可回滚
 	}
 	for _, action := range m.RootActions {
 		expected, ok := want[action.ID]

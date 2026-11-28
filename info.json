@@ -1,8 +1,8 @@
 {
   "id": "ssh-guard",
   "name": "SSH 加固插件",
-  "description": "SSH 登录防护：审计 sshd 配置、按来源/规则管理封禁与解封、白名单防误封、统计登录失败来源，并生成加固建议（建议态，不自动下发）",
-  "version": "0.4.1",
+  "description": "SSH 登录防护：审计 sshd 配置、按来源/规则管理封禁与解封、白名单防误封、统计登录失败来源；加固建议可生成并经受控写一键应用到 sshd_config.d drop-in（应用不等于重载，下次 sshd 重载生效），可按键本回滚",
+  "version": "0.5.0",
   "protocol": "kore.plugin.v1",
   "lifecycle": "lazy",
   "depth_level": "basic",
@@ -17,6 +17,8 @@
     "ssh-guard.suggest": "system:read",
     "ssh-guard.ban.list": "system:read",
     "ssh-guard.whitelist": "system:read",
+    "ssh-guard.apply-hardening": "system:admin",
+    "ssh-guard.rollback-hardening": "system:admin",
     "ssh-guard.ban.add": "system:admin",
     "ssh-guard.ban.remove": "system:admin",
     "ssh-guard.whitelist.add": "system:admin",
@@ -25,7 +27,7 @@
     "ssh-guard.config.set": "system:admin"
   },
   "triggers": [],
-  "requires_kore": ">=0.1.0 <0.2.0",
+  "requires_kore": ">=0.1.6 <0.2.0",
   "resources": {
     "memory_mb": 6,
     "cpu_quota": "10%",
@@ -36,7 +38,7 @@
   "scenario_tags": [
     "sec"
   ],
-  "size_bytes": 2866037,
+  "size_bytes": 2880507,
   "requires_root": true,
   "root_actions": [
     {
@@ -71,6 +73,27 @@
       ],
       "timeout_s": 10,
       "description": "解封 IP：追加参数为单个合法 IP（如 203.0.113.7）。0.2.2 起由 ssh-guard.ban.remove 经本通道真实执行。恢复性动作（可再次封禁回滚），无需一次性 confirm 令牌"
+    },
+    {
+      "id": "sshd-dropin-write",
+      "file_write": {
+        "prefix_class": "sshd.config.d",
+        "mode": "0644",
+        "content_policy": "sshd.dropin.v1",
+        "max_bytes": 65536
+      },
+      "writes_host": true,
+      "target": "/etc/ssh/sshd_config.d/",
+      "description": "经受控写把 ssh-guard 加固片段写入 sshd_config.d drop-in（文件名 kore-ssh-guard-*.conf、root:root 0644；内容由 sshd.dropin.v1 allowlist 校验，备份/审计/账本 purge_op 由内核运行时生成）。应用不等于重载：下次 sshd 重载/重启才生效"
+    },
+    {
+      "id": "sshd-dropin-delete",
+      "file_delete": {
+        "prefix_class": "sshd.config.d"
+      },
+      "writes_host": true,
+      "target": "/etc/ssh/sshd_config.d/",
+      "description": "回滚时经内核受控删除撤销 ssh-guard 加固 drop-in（文件名 kore-ssh-guard-*.conf；删前内核强制备份并登记 purge_op=file.restore，不执行外部命令）。回滚只改文件、不重载 sshd，下次 sshd 重载/重启才读回旧配置"
     }
   ]
 }

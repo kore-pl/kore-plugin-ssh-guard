@@ -28,18 +28,20 @@ type capabilityManifest struct {
 // 写 5 条 → system:admin（ban.add / ban.remove / whitelist.add / whitelist.remove；config.set 同为写）。
 // 分类错误的后果是把写权限降给只读会话，因此这张表也是"只读/写"分类的验收依据。
 var expectedMethodCapabilities = map[string]string{
-	"status":           "system:read",
-	"attempts":         "system:read",
-	"bans":             "system:read",
-	"suggest":          "system:read",
-	"ban.list":         "system:read",
-	"whitelist":        "system:read",
-	"ban.add":          "system:admin",
-	"ban.remove":       "system:admin",
-	"whitelist.add":    "system:admin",
-	"whitelist.remove": "system:admin",
-	"config.get":       "system:read",
-	"config.set":       "system:admin",
+	"status":             "system:read",
+	"attempts":           "system:read",
+	"bans":               "system:read",
+	"suggest":            "system:read",
+	"ban.list":           "system:read",
+	"whitelist":          "system:read",
+	"ban.add":            "system:admin",
+	"ban.remove":         "system:admin",
+	"whitelist.add":      "system:admin",
+	"whitelist.remove":   "system:admin",
+	"config.get":         "system:read",
+	"config.set":         "system:admin",
+	"apply-hardening":    "system:admin",
+	"rollback-hardening": "system:admin",
 }
 
 // privilegedCapabilitySet 是内核唯一白名单（internal/core/registry/validate.go）。

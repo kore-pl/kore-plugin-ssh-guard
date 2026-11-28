@@ -66,6 +66,10 @@ func dispatch(request *pluginapi.Request, cfg *config, logger *slog.Logger) (*pl
 		perr = handleWhitelistWrite(request.Params, verb, *cfg, response)
 	case "ban.add", "ban.remove":
 		perr = handleBanWrite(request.Params, verb, guardRootAction, *cfg, response)
+	case "apply-hardening":
+		perr = handleApplyHardening(request.Params, guardFileWrite, response)
+	case "rollback-hardening":
+		perr = handleRollbackHardening(guardFileDelete, response)
 	default:
 		perr = notFound(verb)
 	}
@@ -81,7 +85,7 @@ func businessVerb(method, id string) (string, bool) {
 	verb := strings.TrimPrefix(method, id+".")
 	switch verb {
 	case "status", "attempts", "bans", "config.get", "config.set", "ban.list", "ban.add", "ban.remove", "suggest",
-		"whitelist", "whitelist.add", "whitelist.remove":
+		"whitelist", "whitelist.add", "whitelist.remove", "apply-hardening", "rollback-hardening":
 		return verb, true
 	default:
 		return "", false

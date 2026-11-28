@@ -97,7 +97,44 @@ type rootActionError struct {
 	Hint    string `json:"hint"`
 }
 
-// Call 经内核执行一个声明过的 root 动作，返回输出与退出码。
+// fileWriteRequest 是 file_write 动作的请求体（ADR-0052 / ADR-0060）：单层文件名 + 正文。
+// 目录不在请求里——它只来自 info.json 声明的类别（sshd.config.d），
+// 插件自报目录的字段根本不存在，所以这里没有第二条注入面。
+type fileWriteRequest struct {
+	ActionID string   `json:"action_id"`
+	Args     []string `json:"args"`
+	Content  string   `json:"content"`
+}
+
+// fileWriteFunc 是插件→内核受控写的调用面；nil 表示内核未注入提权通道。
+//
+// 与 rootActionFunc（exec 动作）分开：file_write 的请求体多一个 content 字段，
+// 两种语义不混用，避免「一半走 argv、一半走正文」的歧义。
+type fileWriteFunc func(actionID, name, content string) (rootActionOutput, error)
+
+// fileDeleteFunc 是插件→内核受控删除的调用面；nil 表示内核未注入提权通道。
+// 删除请求只有 action_id + args[0]（单层文件名），不带正文。
+type fileDeleteFunc func(actionID, name string) (rootActionOutput, error)
+
+// fileWriteFuncFromEnv 在通道三要素齐备时返回受控写调用面；缺一返回 nil。
+func fileWriteFuncFromEnv() fileWriteFunc {
+	client := newRootActionClient()
+	if client == nil {
+		return nil
+	}
+	return client.WriteFile
+}
+
+// fileDeleteFuncFromEnv 在通道三要素齐备时返回受控删除调用面；缺一返回 nil。
+func fileDeleteFuncFromEnv() fileDeleteFunc {
+	client := newRootActionClient()
+	if client == nil {
+		return nil
+	}
+	return client.DeleteFile
+}
+
+// Call 经内核执行一个声明过的 root 动作（exec / file_delete），返回输出与退出码。
 // 错误信息保留内核错误码与 hint，便于上层拼可操作提示（不吞错、不改写成成功）。
 //
 // confirm 只用于不可回滚动作（info.json 的 irreversible:true）；其余动作传空串。
@@ -107,6 +144,31 @@ func (c *rootActionClient) Call(actionID string, args []string, confirm string) 
 	if err != nil {
 		return rootActionOutput{}, fmt.Errorf("序列化 root-action 请求失败：%w", err)
 	}
+	return c.post(body)
+}
+
+// WriteFile 经内核受控写通道写 drop-in 片段：不 exec 任何命令，
+// 备份 / 审计 / 原子替换 / 属主复核 / changes.jsonl 全在内核侧（ADR-0052/0060）。
+func (c *rootActionClient) WriteFile(actionID, name, content string) (rootActionOutput, error) {
+	body, err := json.Marshal(fileWriteRequest{ActionID: actionID, Args: []string{name}, Content: content})
+	if err != nil {
+		return rootActionOutput{}, fmt.Errorf("序列化 file_write 请求失败：%w", err)
+	}
+	return c.post(body)
+}
+
+// DeleteFile 经内核受控删除通道删 drop-in 片段：不 exec 任何命令、不 os.Remove；
+// 属主复核 / 强制备份 / 审计 / changes.jsonl（purge_op=file.restore）全在内核侧（ADR-0053）。
+func (c *rootActionClient) DeleteFile(actionID, name string) (rootActionOutput, error) {
+	body, err := json.Marshal(rootActionRequest{ActionID: actionID, Args: []string{name}})
+	if err != nil {
+		return rootActionOutput{}, fmt.Errorf("序列化 file_delete 请求失败：%w", err)
+	}
+	return c.post(body)
+}
+
+// post 是通道请求的公共 HTTP 层：UDS → 解析协议错误 / 结果（body 由各语义各自序列化）。
+func (c *rootActionClient) post(body []byte) (rootActionOutput, error) {
 	req, err := http.NewRequest(http.MethodPost,
 		"http://kore/api/v1/plugins/"+c.pluginID+"/root-action", bytes.NewReader(body))
 	if err != nil {
